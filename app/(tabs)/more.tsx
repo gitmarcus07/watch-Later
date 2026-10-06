@@ -1,0 +1,23 @@
+import { useRouter } from 'expo-router';
+import { Ionicons } from '@expo/vector-icons';
+import { Pressable, StyleSheet, View } from 'react-native';
+import { AppText } from '@/components/common/AppText';
+import { Screen } from '@/components/common/Screen';
+import { colors, radius, spacing } from '@/theme';
+
+const groups = [
+  { title: 'PREFERENCES', rows: [{ label: 'Appearance', detail: 'Dark cinematic', icon: 'contrast-outline' }, { label: 'Notifications', detail: 'Coming soon', icon: 'notifications-outline' }] },
+  { title: 'LIBRARY', rows: [{ label: 'Lists', detail: 'Your curated collections', icon: 'list-outline' }, { label: 'Favorites', detail: 'Your favorite titles', icon: 'heart-outline' }, { label: 'History', detail: 'Recently viewed', icon: 'time-outline' }] },
+  { title: 'ABOUT', rows: [{ label: 'About Watch Later', detail: 'A little about this app', icon: 'information-circle-outline' }, { label: 'Privacy & terms', detail: 'Your data, your choice', icon: 'shield-checkmark-outline' }] },
+] as const;
+
+export default function MoreScreen() {
+  const router = useRouter();
+  return <Screen scroll><View style={styles.top}><AppText variant="heading1">More</AppText><AppText variant="bodySmall" muted>Your Watch Later space</AppText></View>
+    <View style={styles.profile}><View style={styles.avatar}><Ionicons name="person-outline" size={22} color={colors.accent} /></View><View style={styles.profileCopy}><AppText variant="heading3">Guest profile</AppText><AppText variant="caption" muted>Your collection stays on this device</AppText></View><Ionicons name="chevron-forward" size={18} color={colors.textMuted} /></View>
+    {groups.map((group) => <View key={group.title} style={styles.group}><AppText variant="caption" style={styles.groupTitle}>{group.title}</AppText><View style={styles.groupCard}>{group.rows.map((row) => <Pressable key={row.label} accessibilityRole="button" accessibilityLabel={`${row.label}, ${row.detail}`} onPress={() => undefined} style={({ pressed }) => [styles.row, pressed && styles.pressed]}><Ionicons name={row.icon} size={20} color={colors.textSecondary} /><View style={styles.rowCopy}><AppText variant="bodyMedium">{row.label}</AppText><AppText variant="caption" muted>{row.detail}</AppText></View><Ionicons name="chevron-forward" size={17} color={colors.textMuted} /></Pressable>)}</View></View>)}
+    <View style={styles.group}><AppText variant="caption" style={styles.groupTitle}>ACCOUNT</AppText><View style={styles.groupCard}><Pressable accessibilityRole="button" onPress={() => router.push('/(auth)/login')} style={styles.row}><Ionicons name="log-in-outline" size={20} color={colors.accent} /><View style={styles.rowCopy}><AppText variant="bodyMedium">Sign in</AppText><AppText variant="caption" muted>Sync your collection across devices</AppText></View><Ionicons name="chevron-forward" size={17} color={colors.textMuted} /></Pressable><Pressable accessibilityRole="button" onPress={() => router.push('/(auth)/create-account')} style={styles.row}><Ionicons name="person-add-outline" size={20} color={colors.accent} /><View style={styles.rowCopy}><AppText variant="bodyMedium">Create account</AppText><AppText variant="caption" muted>Keep your watchlist with you</AppText></View><Ionicons name="chevron-forward" size={17} color={colors.textMuted} /></Pressable></View></View>
+    <AppText variant="caption" muted style={styles.version}>WATCH LATER · VERSION 1.0</AppText>
+  </Screen>;
+}
+const styles = StyleSheet.create({ top: { paddingTop: spacing.lg, paddingBottom: spacing.xl, gap: spacing.xs }, profile: { flexDirection: 'row', alignItems: 'center', padding: spacing.lg, gap: spacing.md, backgroundColor: colors.surface, borderRadius: radius.large, borderWidth: 1, borderColor: colors.border, marginBottom: spacing.xl }, avatar: { width: 48, height: 48, borderRadius: 24, backgroundColor: colors.surfaceElevated, alignItems: 'center', justifyContent: 'center' }, profileCopy: { flex: 1, gap: 2 }, group: { marginBottom: spacing.xl }, groupTitle: { color: colors.textMuted, letterSpacing: 1, marginBottom: spacing.sm, marginLeft: spacing.xs }, groupCard: { backgroundColor: colors.surface, borderRadius: radius.medium, borderWidth: 1, borderColor: colors.border, overflow: 'hidden' }, row: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingHorizontal: spacing.lg, paddingVertical: spacing.md, minHeight: 66, borderBottomWidth: StyleSheet.hairlineWidth, borderBottomColor: colors.border }, rowCopy: { flex: 1, gap: 2 }, pressed: { backgroundColor: colors.surfaceElevated }, version: { textAlign: 'center', paddingBottom: spacing.xl, letterSpacing: 0.8 } });

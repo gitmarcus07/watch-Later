@@ -1,0 +1,14 @@
+import { LinearGradient } from 'expo-linear-gradient';
+import { Pressable, StyleSheet, View } from 'react-native';
+import { Ionicons } from '@expo/vector-icons';
+import { AppText } from '@/components/common/AppText';
+import { PreviewMedia } from '@/features/catalog/mock/mockMedia';
+import { colors, radius, spacing } from '@/theme';
+
+export function ContinueWatchingCard({ title, subtitle, progress, palette, onPress }: { title: string; subtitle: string; progress: number; palette: PreviewMedia['palette']; onPress?: () => void }) {
+  return <Pressable accessibilityRole="button" accessibilityLabel={`Continue watching ${title}`} onPress={onPress} style={({ pressed }) => [styles.card, pressed && styles.pressed]}>
+    <LinearGradient colors={[...palette]} style={styles.poster}><Ionicons name="play" size={27} color={colors.white} /><AppText variant="caption" style={styles.posterText}>{title.toUpperCase()}</AppText></LinearGradient>
+    <View style={styles.copy}><AppText variant="caption" style={styles.eyebrow}>CONTINUE WATCHING</AppText><AppText variant="heading3" numberOfLines={1}>{title}</AppText><AppText variant="bodySmall" muted>{subtitle}</AppText><View style={styles.progressRow}><View style={styles.track}><View style={[styles.fill, { width: `${Math.max(0, Math.min(1, progress)) * 100}%` }]} /></View><AppText variant="caption" muted>{Math.round(progress * 100)}%</AppText></View><View style={styles.continue}><AppText variant="label" style={{ color: colors.accent }}>Continue</AppText><Ionicons name="arrow-forward" size={16} color={colors.accent} /></View></View>
+  </Pressable>;
+}
+const styles = StyleSheet.create({ card: { flexDirection: 'row', gap: spacing.lg, padding: spacing.md, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radius.card, marginBottom: spacing['2xl'] }, poster: { width: 112, minHeight: 158, borderRadius: radius.medium, padding: spacing.md, alignItems: 'center', justifyContent: 'center', gap: spacing.md }, posterText: { color: colors.white, textAlign: 'center', letterSpacing: 1 }, copy: { flex: 1, justifyContent: 'center', gap: spacing.sm }, eyebrow: { color: colors.accent, letterSpacing: 1 }, progressRow: { flexDirection: 'row', gap: spacing.sm, alignItems: 'center', marginTop: spacing.xs }, track: { flex: 1, height: 4, borderRadius: 2, backgroundColor: colors.surfaceElevated, overflow: 'hidden' }, fill: { height: 4, backgroundColor: colors.accent }, continue: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, marginTop: spacing.xs }, pressed: { opacity: 0.84, transform: [{ scale: 0.99 }] } });

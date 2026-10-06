@@ -1,0 +1,25 @@
+{
+  "expo": {
+    "name": "Watch Later",
+    "slug": "watch-later",
+    "scheme": "watchlater",
+    "version": "1.0.0",
+    "orientation": "portrait",
+    "userInterfaceStyle": "dark",    "ios": {
+      "supportsTablet": true,
+      "bundleIdentifier": "com.watchlater.app"
+    },
+    "android": {
+      "package": "com.watchlater.app"    },
+    "plugins": [
+      "expo-router",
+      "expo-sqlite",
+      "expo-font"
+    ],
+    "experiments": {
+      "typedRoutes": true
+    }
+  }
+}
+
+
