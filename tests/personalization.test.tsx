@@ -101,3 +101,28 @@ describe('profile avatar', () => {
   });
 });
 
+describe('search empty state', () => {
+  beforeEach(() => {
+    jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Unmocked network request blocked by personalization test'));
+  });
+
+  afterEach(() => {
+    jest.restoreAllMocks();
+  });
+
+  it('never names catalog providers and offers tappable suggestions', async () => {
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => {
+      renderer = create(<QueryClientProvider client={queryClient}><SearchScreen /></QueryClientProvider>);
+    });
+    const text = JSON.stringify(renderer.toJSON());
+    expect(text).toContain('Find something to watch tonight');
+    expect(text).not.toMatch(/TMDb|AniList/);
+    const input = renderer.root.findByProps({ accessibilityLabel: 'Search movies, shows and anime' });
+    expect(input.props.value).toBe('');
+    const chip = renderer.root.findByProps({ accessibilityLabel: 'Search for Dune' });
+    await act(async () => { chip.props.onPress(); });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Search movies, shows and anime' }).props.value).toBe('Dune');
+    await act(async () => { renderer.unmount(); });
+  });
+});
