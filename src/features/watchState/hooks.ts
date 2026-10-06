@@ -2,8 +2,7 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { CatalogMedia, CatalogSeason, MediaIdentity } from '@/domain/models/media';
 import { catalogRepository } from '@/data/remote/catalog/RemoteCatalogRepository';
 import { watchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
-import { syncService } from '@/features/sync/SyncService';
-import { useSessionStore } from '@/store/app/sessionStore';
+import { scheduleAutoSync } from '@/features/sync/autoSync';
 
 export const watchKeys = {
   all: ['watch'] as const,
@@ -19,8 +18,7 @@ function useInvalidateWatchState() {
   const queryClient = useQueryClient();
   return (sync = false) => {
     void queryClient.invalidateQueries({ queryKey: watchKeys.all });
-    const session = useSessionStore.getState().session;
-    if (sync && session.mode === 'authenticated') void syncService.sync(session.userId).catch(() => undefined);
+    if (sync) scheduleAutoSync('mutation');
   };
 }
 

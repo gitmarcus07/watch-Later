@@ -7,6 +7,7 @@ import { AppButton } from '@/components/buttons/AppButton';
 import { IconButton } from '@/components/buttons/IconButton';
 import { Screen } from '@/components/common/Screen';
 import { SupabaseAuthService } from './SupabaseAuthService';
+import { scheduleAutoSync } from '@/features/sync/autoSync';
 import { persistSession } from '@/store/app/sessionPersistence';
 import { useSessionStore } from '@/store/app/sessionStore';
 import { colors, radius, spacing } from '@/theme';
@@ -34,6 +35,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
       const session = isSignUp ? await authService.createAccount(normalizedEmail, password) : await authService.signIn(normalizedEmail, password);
       await persistSession(session, true);
       setSession(session); setOnboardingComplete(true);
+      if (session.mode === 'authenticated') scheduleAutoSync('auth');
       router.replace('/(tabs)');
     } catch (cause) {
       setError(cause instanceof Error ? cause.message : 'Unable to connect to your account. Try again.');

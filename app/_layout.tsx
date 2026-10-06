@@ -13,7 +13,7 @@ import { useSessionStore } from '@/store/app/sessionStore';
 import { SqliteDatabaseRepository } from '@/data/local/repositories/SqliteDatabaseRepository';
 import { LoadingView } from '@/components/feedback/FeedbackViews';
 import { supabase } from '@/data/remote/supabase/client';
-import { syncService } from '@/features/sync/SyncService';
+import { handleAutoSyncForeground, scheduleAutoSync, startAutoSync } from '@/features/sync/autoSync';
 import { watchStateSyncRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
 
 const database = new SqliteDatabaseRepository();
@@ -42,7 +42,7 @@ export default function RootLayout() {
             const current = useSessionStore.getState();
             current.setSession(authenticated);
             await persistSession(authenticated, current.onboardingComplete);
-            if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION' || event === 'TOKEN_REFRESHED') void syncService.sync(session.user.id).catch(() => undefined);
+            if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION' || event === 'TOKEN_REFRESHED') scheduleAutoSync('auth');
           }).catch(async () => {
             await authClient.auth.signOut();
             const current = useSessionStore.getState();
@@ -66,11 +66,13 @@ export default function RootLayout() {
       if (state === 'active') {
         void queryClient.resumePausedMutations();
         const session = useSessionStore.getState().session;
-        if (session.mode === 'authenticated') void syncService.sync(session.userId).catch(() => undefined);
+        if (session.mode === 'authenticated') handleAutoSyncForeground();
       }
     });
     return () => subscription.remove();
   }, []);
+
+  useEffect(() => startAutoSync(), []);
 
   if (!hydrated || (!databaseReady && !startupError)) {
     return <SafeAreaProvider><View style={styles.startup}><StatusBar style="light" /><LoadingView label="Getting things ready" /></View></SafeAreaProvider>;
