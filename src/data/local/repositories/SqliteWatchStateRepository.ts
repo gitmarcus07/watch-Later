@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import { AppError } from '@/domain/errors/AppError';
 import type { CatalogMedia, CatalogSeason, MediaEpisode, MediaIdentity } from '@/domain/models/media';
-import type { ContinueWatchingItem, LibraryStatus, SeriesProgress, WatchStateRepository, WatchlistEntry, WatchedLibraryItem } from '@/domain/models/watchState';
+import type { ContinueWatchingItem, LibraryStatus, PendingWatchStateChange, SeriesProgress, WatchStateRepository, WatchStateSyncRepository, WatchlistEntry, WatchedLibraryItem } from '@/domain/models/watchState';
 import { getDatabase } from '@/data/local/database/database';
 import { mediaId } from '@/features/catalog/mediaIdentity';
 
@@ -53,6 +53,28 @@ function mapEpisode(row: EpisodeRow): MediaEpisode {
 }
 
 function optional(value: string | number | undefined): string | number | null { return value ?? null; }
+
+function syncSnapshot(media: CatalogMedia): CatalogMedia {
+  return {
+    id: media.id, provider: media.provider, providerId: media.providerId, mediaType: media.mediaType,
+    title: media.title, originalTitle: media.originalTitle, overview: media.overview, posterUrl: media.posterUrl,
+    backdropUrl: media.backdropUrl, releaseDate: media.releaseDate, year: media.year, genres: media.genres,
+    numberOfSeasons: media.numberOfSeasons, numberOfEpisodes: media.numberOfEpisodes,
+    seasonSummaries: media.seasonSummaries, episodeMetadata: media.episodeMetadata,
+  };
+}
+
+async function enqueueSyncChange(db: SQLiteDatabase, change: Omit<PendingWatchStateChange, 'id' | 'retryCount'>): Promise<void> {
+  await db.runAsync(
+    `INSERT INTO sync_queue (entity_type, entity_key, provider, media_type, provider_id, season_number, episode_number, is_deleted, updated_at, payload)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+     ON CONFLICT(entity_type, entity_key) DO UPDATE SET provider=excluded.provider, media_type=excluded.media_type, provider_id=excluded.provider_id,
+      season_number=excluded.season_number, episode_number=excluded.episode_number, is_deleted=excluded.is_deleted, updated_at=excluded.updated_at, payload=excluded.payload, last_error=NULL`,
+    change.entityType, change.entityKey, change.provider, change.mediaType, change.providerId,
+    optional(change.seasonNumber), optional(change.episodeNumber), change.deleted ? 1 : 0, change.updatedAt,
+    JSON.stringify({ media: syncSnapshot(change.media), watchedAt: change.watchedAt, episode: change.episode }),
+  );
+}
 
 async function saveMedia(db: SQLiteDatabase, media: CatalogMedia): Promise<void> {
   await db.runAsync(
@@ -129,7 +151,7 @@ function toProgress(row: SeriesRow, episodes: EpisodeRow[]): SeriesProgress {
   };
 }
 
-export class SqliteWatchStateRepository implements WatchStateRepository {
+export class SqliteWatchStateRepository implements WatchStateRepository, WatchStateSyncRepository {
   constructor(private readonly openDatabase: () => Promise<SQLiteDatabase> = getDatabase) {}
 
   private async run<T>(fallbackMessage: string, action: (database: SQLiteDatabase) => Promise<T>): Promise<T> {
@@ -182,6 +204,7 @@ export class SqliteWatchStateRepository implements WatchStateRepository {
       await db.withExclusiveTransactionAsync(async (tx) => {
         await saveMedia(tx, media);
         await tx.runAsync('INSERT INTO watchlist_entries (media_id) VALUES (?) ON CONFLICT(media_id) DO NOTHING', media.id);
+        await enqueueSyncChange(tx, { entityType: 'watchlist', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: false, updatedAt: new Date().toISOString(), media });
       });
     });
   }
@@ -190,6 +213,8 @@ export class SqliteWatchStateRepository implements WatchStateRepository {
     await this.run("Couldn't update your watchlist. Try again.", async (db) => {
       const id = mediaId(identity);
       await db.withExclusiveTransactionAsync(async (tx) => {
+        const mediaRow = await tx.getFirstAsync<MediaRow>('SELECT * FROM tracked_media WHERE id = ?', id);
+        if (mediaRow) await enqueueSyncChange(tx, { entityType: 'watchlist', entityKey: id, provider: identity.provider, mediaType: identity.mediaType, providerId: identity.providerId, deleted: true, updatedAt: new Date().toISOString(), media: mapMedia(mediaRow) });
         await tx.runAsync('DELETE FROM watchlist_entries WHERE media_id = ?', id);
         await this.pruneMedia(tx, id);
       });
@@ -214,6 +239,7 @@ export class SqliteWatchStateRepository implements WatchStateRepository {
         await saveMedia(tx, media);
         if (watched) await tx.runAsync('INSERT INTO movie_watches (media_id) VALUES (?) ON CONFLICT(media_id) DO NOTHING', media.id);
         else await tx.runAsync('DELETE FROM movie_watches WHERE media_id = ?', media.id);
+        await enqueueSyncChange(tx, { entityType: 'movie', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: !watched, updatedAt: new Date().toISOString(), media, watchedAt: watched ? new Date().toISOString() : undefined });
         if (!watched) await this.pruneMedia(tx, media.id);
       });
     });
@@ -225,13 +251,15 @@ export class SqliteWatchStateRepository implements WatchStateRepository {
 
   async startTrackingSeries(media: CatalogMedia): Promise<void> {
     if (media.mediaType === 'movie') throw new AppError('validation', 'Only series can be tracked.');
-    await this.run("Couldn't start tracking this series.", async (db) => { await db.withExclusiveTransactionAsync((tx) => ensureSeries(tx, media)); });
+    await this.run("Couldn't start tracking this series.", async (db) => { await db.withExclusiveTransactionAsync(async (tx) => { await ensureSeries(tx, media); await enqueueSyncChange(tx, { entityType: 'series', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: false, updatedAt: new Date().toISOString(), media }); }); });
   }
 
   async stopTrackingSeries(identity: MediaIdentity): Promise<void> {
     await this.run("Couldn't stop tracking this series.", async (db) => {
       const id = mediaId(identity);
       await db.withExclusiveTransactionAsync(async (tx) => {
+        const mediaRow = await tx.getFirstAsync<MediaRow>('SELECT * FROM tracked_media WHERE id = ?', id);
+        if (mediaRow) await enqueueSyncChange(tx, { entityType: 'series', entityKey: id, provider: identity.provider, mediaType: identity.mediaType, providerId: identity.providerId, deleted: true, updatedAt: new Date().toISOString(), media: mapMedia(mediaRow) });
         await tx.runAsync('DELETE FROM tracked_series WHERE media_id = ?', id);
         await this.pruneMedia(tx, id);
       });
@@ -261,6 +289,7 @@ export class SqliteWatchStateRepository implements WatchStateRepository {
         await saveSeason(tx, media, { ...season, episodeCount: summary?.episodeCount });
         const now = watched ? new Date().toISOString() : null;
         await tx.runAsync('UPDATE tracked_episodes SET watched_at = CASE WHEN ? IS NULL THEN NULL ELSE COALESCE(watched_at, ?) END, updated_at = CURRENT_TIMESTAMP WHERE id = ?', now, now, `tmdb:episode:${encodeURIComponent(episode.providerId)}`);
+        await enqueueSyncChange(tx, { entityType: 'episode', entityKey: `${media.id}:${episode.seasonNumber}:${episode.episodeNumber}`, provider: media.provider, mediaType: media.mediaType, providerId: episode.providerId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, deleted: !watched, updatedAt: new Date().toISOString(), media, watchedAt: watched ? now ?? undefined : undefined, episode });
         await tx.runAsync('UPDATE tracked_series SET updated_at = CURRENT_TIMESTAMP WHERE media_id = ?', media.id);
       });
     });
@@ -276,6 +305,7 @@ export class SqliteWatchStateRepository implements WatchStateRepository {
         await saveSeason(tx, media, { ...season, episodeCount: summary?.episodeCount });
         const now = watched ? new Date().toISOString() : null;
         await tx.runAsync('UPDATE tracked_episodes SET watched_at = CASE WHEN ? IS NULL THEN NULL ELSE COALESCE(watched_at, ?) END, updated_at = CURRENT_TIMESTAMP WHERE series_id = ? AND season_number = ?', now, now, media.id, season.seasonNumber);
+        for (const episode of season.episodes) await enqueueSyncChange(tx, { entityType: 'episode', entityKey: `${media.id}:${episode.seasonNumber}:${episode.episodeNumber}`, provider: media.provider, mediaType: media.mediaType, providerId: episode.providerId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, deleted: !watched, updatedAt: new Date().toISOString(), media, watchedAt: watched ? now ?? undefined : undefined, episode });
         await tx.runAsync('UPDATE tracked_series SET updated_at = CURRENT_TIMESTAMP WHERE media_id = ?', media.id);
       });
     });
@@ -290,6 +320,11 @@ export class SqliteWatchStateRepository implements WatchStateRepository {
         for (const season of seasons) await saveSeason(tx, media, season);
         const now = watched ? new Date().toISOString() : null;
         await tx.runAsync('UPDATE tracked_episodes SET watched_at = CASE WHEN ? IS NULL THEN NULL ELSE COALESCE(watched_at, ?) END, updated_at = CURRENT_TIMESTAMP WHERE series_id = ?', now, now, media.id);
+        const episodes = seasons.flatMap((season) => season.episodes);
+        const storedEpisodes: MediaEpisode[] = episodes.length ? episodes : (await tx.getAllAsync<EpisodeRow>('SELECT * FROM tracked_episodes WHERE series_id = ?', media.id)).map(mapEpisode);
+        for (const episode of storedEpisodes) {
+          await enqueueSyncChange(tx, { entityType: 'episode', entityKey: `${media.id}:${episode.seasonNumber}:${episode.episodeNumber}`, provider: media.provider, mediaType: media.mediaType, providerId: episode.providerId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, deleted: !watched, updatedAt: new Date().toISOString(), media, watchedAt: watched ? now ?? undefined : undefined, episode });
+        }
         await tx.runAsync('UPDATE tracked_series SET updated_at = CURRENT_TIMESTAMP WHERE media_id = ?', media.id);
       });
     });
@@ -346,6 +381,90 @@ export class SqliteWatchStateRepository implements WatchStateRepository {
     });
   }
 
+  async getPendingChanges(): Promise<PendingWatchStateChange[]> {
+    return this.run("Couldn't load pending sync changes.", async (db) => {
+      const rows = await db.getAllAsync<{ id: number; entity_type: PendingWatchStateChange['entityType']; entity_key: string; provider: PendingWatchStateChange['provider']; media_type: PendingWatchStateChange['mediaType']; provider_id: string; season_number: number | null; episode_number: number | null; is_deleted: number; updated_at: string; payload: string; retry_count: number }>('SELECT * FROM sync_queue ORDER BY updated_at, id');
+      return rows.flatMap((row) => {
+        try {
+          const payload = JSON.parse(row.payload) as { media: CatalogMedia; watchedAt?: string; episode?: MediaEpisode };
+          if (!payload.media?.id) return [];
+          return [{ id: row.id, entityType: row.entity_type, entityKey: row.entity_key, provider: row.provider, mediaType: row.media_type, providerId: row.provider_id, seasonNumber: row.season_number ?? undefined, episodeNumber: row.episode_number ?? undefined, deleted: row.is_deleted === 1, updatedAt: row.updated_at, media: payload.media, watchedAt: payload.watchedAt, episode: payload.episode, retryCount: row.retry_count }];
+        } catch { return []; }
+      });
+    });
+  }
+
+  async applyRemoteChanges(changes: PendingWatchStateChange[]): Promise<void> {
+    await this.run("Couldn't merge your synced library.", async (db) => {
+      await db.withExclusiveTransactionAsync(async (tx) => {
+        for (const change of changes) {
+          await saveMedia(tx, change.media);
+          if (change.entityType === 'watchlist') {
+            if (change.deleted) await tx.runAsync('DELETE FROM watchlist_entries WHERE media_id = ?', change.media.id);
+            else await tx.runAsync('INSERT INTO watchlist_entries (media_id, added_at) VALUES (?, ?) ON CONFLICT(media_id) DO UPDATE SET added_at=excluded.added_at', change.media.id, change.updatedAt);
+          } else if (change.entityType === 'movie') {
+            if (change.deleted) await tx.runAsync('DELETE FROM movie_watches WHERE media_id = ?', change.media.id);
+            else await tx.runAsync('INSERT INTO movie_watches (media_id, watched_at) VALUES (?, ?) ON CONFLICT(media_id) DO UPDATE SET watched_at=excluded.watched_at', change.media.id, change.watchedAt ?? change.updatedAt);
+          } else if (change.entityType === 'series') {
+            if (change.deleted) await tx.runAsync('DELETE FROM tracked_series WHERE media_id = ?', change.media.id);
+            else await tx.runAsync('INSERT INTO tracked_series (media_id, tracking_started_at, updated_at) VALUES (?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET updated_at=excluded.updated_at', change.media.id, change.updatedAt, change.updatedAt);
+          } else if (change.episode) {
+            await saveMedia(tx, change.media);
+            await saveEpisode(tx, change.media, change.episode);
+            await tx.runAsync('UPDATE tracked_episodes SET watched_at = ?, updated_at = ? WHERE id = ?', change.deleted ? null : change.watchedAt ?? change.updatedAt, change.updatedAt, `tmdb:episode:${encodeURIComponent(change.episode.providerId)}`);
+          }
+        }
+      });
+    });
+  }
+
+  async markSynced(changes: PendingWatchStateChange[]): Promise<void> {
+    if (!changes.length) return;
+    await this.run("Couldn't update sync status.", async (db) => {
+      await db.withExclusiveTransactionAsync(async (tx) => {
+        const conditions = changes.map(() => '(id = ? AND updated_at = ?)').join(' OR ');
+        await tx.runAsync(`DELETE FROM sync_queue WHERE ${conditions}`, ...changes.flatMap(({ id, updatedAt }) => [id, updatedAt]));
+      });
+    });
+  }
+
+  async recordSyncFailure(changes: PendingWatchStateChange[], safeMessage: string): Promise<void> {
+    if (!changes.length) return;
+    await this.run("Couldn't save sync retry status.", async (db) => {
+      const conditions = changes.map(() => '(id = ? AND updated_at = ?)').join(' OR ');
+      await db.runAsync(`UPDATE sync_queue SET retry_count = retry_count + 1, last_error = ? WHERE ${conditions}`, safeMessage.slice(0, 160), ...changes.flatMap(({ id, updatedAt }) => [id, updatedAt]));
+    });
+  }
+
+  async bindAccount(accountId: string): Promise<void> {
+    await this.run("Couldn't prepare this account's local library.", async (db) => {
+      await db.withExclusiveTransactionAsync(async (tx) => {
+        const binding = await tx.getFirstAsync<{ account_id: string }>('SELECT account_id FROM account_binding WHERE id = 1');
+        if (binding && binding.account_id !== accountId) throw new AppError('authentication', 'This device library is linked to another account. Sign back into that account before syncing.');
+        if (binding) return;
+        await tx.runAsync('INSERT INTO account_binding (id, account_id) VALUES (1, ?)', accountId);
+        const watchlist = await tx.getAllAsync<MediaRow & { added_at: string }>('SELECT m.*, w.added_at FROM watchlist_entries w JOIN tracked_media m ON m.id = w.media_id');
+        for (const row of watchlist) await enqueueSyncChange(tx, { entityType: 'watchlist', entityKey: row.id, provider: row.provider, mediaType: row.media_type, providerId: row.provider_id, deleted: false, updatedAt: row.added_at, media: mapMedia(row) });
+        const movies = await tx.getAllAsync<MediaRow & { watched_at: string }>('SELECT m.*, w.watched_at FROM movie_watches w JOIN tracked_media m ON m.id = w.media_id');
+        for (const row of movies) await enqueueSyncChange(tx, { entityType: 'movie', entityKey: row.id, provider: row.provider, mediaType: row.media_type, providerId: row.provider_id, deleted: false, updatedAt: row.watched_at, watchedAt: row.watched_at, media: mapMedia(row) });
+        const series = await tx.getAllAsync<MediaRow & { updated_at: string }>('SELECT m.*, s.updated_at FROM tracked_series s JOIN tracked_media m ON m.id = s.media_id');
+        for (const row of series) await enqueueSyncChange(tx, { entityType: 'series', entityKey: row.id, provider: row.provider, mediaType: row.media_type, providerId: row.provider_id, deleted: false, updatedAt: row.updated_at, media: mapMedia(row) });
+        const episodes = await tx.getAllAsync<EpisodeRow>('SELECT * FROM tracked_episodes WHERE watched_at IS NOT NULL');
+        const savedMedia = new Map((await tx.getAllAsync<MediaRow>('SELECT * FROM tracked_media')).map((row) => [row.id, row]));
+        for (const row of episodes) {
+          const parent = savedMedia.get(row.series_id);
+          if (!parent) continue;
+          const episode = mapEpisode(row);
+          await enqueueSyncChange(tx, { entityType: 'episode', entityKey: `${row.series_id}:${row.season_number}:${row.episode_number}`, provider: 'tmdb', mediaType: 'series', providerId: row.provider_id, seasonNumber: row.season_number, episodeNumber: row.episode_number, deleted: false, updatedAt: row.watched_at ?? new Date().toISOString(), watchedAt: row.watched_at ?? undefined, media: mapMedia(parent), episode });
+        }
+      });
+    });
+  }
+
+  async getBoundAccount(): Promise<string | undefined> {
+    return this.run("Couldn't read account ownership.", async (db) => (await db.getFirstAsync<{ account_id: string }>('SELECT account_id FROM account_binding WHERE id = 1'))?.account_id);
+  }
+
   private async pruneMedia(db: SQLiteDatabase, id: string): Promise<void> {
     await db.runAsync(
       `DELETE FROM tracked_media WHERE id = ? AND NOT EXISTS (SELECT 1 FROM watchlist_entries WHERE media_id = ?)
@@ -354,4 +473,6 @@ export class SqliteWatchStateRepository implements WatchStateRepository {
   }
 }
 
-export const watchStateRepository: WatchStateRepository = new SqliteWatchStateRepository();
+const sqliteWatchStateRepository = new SqliteWatchStateRepository();
+export const watchStateRepository: WatchStateRepository = sqliteWatchStateRepository;
+export const watchStateSyncRepository: WatchStateSyncRepository = sqliteWatchStateRepository;

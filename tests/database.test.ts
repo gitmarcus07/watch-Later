@@ -20,10 +20,10 @@ describe('local database foundation', () => {
 
     await runMigrations(database);
     expect(database.withExclusiveTransactionAsync).toHaveBeenCalledTimes(1);
-    expect(appliedVersions).toEqual([1, 2, 3]);
+    expect(appliedVersions).toEqual([1, 2, 3, 4]);
     expect(statements.some((sql) => sql.includes('content_references'))).toBe(true);
     await runMigrations(database);
-    expect(appliedVersions).toEqual([1, 2, 3]);
+    expect(appliedVersions).toEqual([1, 2, 3, 4]);
   });
 
   it('exposes initialization through a repository boundary', async () => {

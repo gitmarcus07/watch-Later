@@ -26,3 +26,17 @@ The Android/iOS commands require their respective native toolchains; `npm start`
 ## Data and guest mode
 
 SQLite initializes on app startup before routes render. Guest session metadata is persisted separately from future collection data. Add schema changes as a new numbered migration; do not edit a migration after it has shipped. Keep SQL in data-layer code and preserve guest data when adding account migration.
+
+## Supabase accounts and sync
+
+Set `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_ANON_KEY` in a local `.env`. These are the public client URL and anon/publishable key only. Never add a service-role key, database password, or JWT secret to the Expo app or `.env.example`.
+
+Apply the versioned cloud migration using the Supabase CLI from a trusted development machine after linking the intended project (`supabase link --project-ref <project-ref>`, then `supabase db push`). Review `supabase/migrations/202610060001_watch_state.sql` first. This repository does not include the Supabase CLI, and the mobile app does not apply schema changes.
+
+Sign-up and sign-in are available from More. If email confirmation is enabled, confirm the address and then sign in. Guest watch-state stays in SQLite and is merged at first authenticated sync. SQLite remains the runtime source of truth. Mutations enter a durable outbox; foregrounding the app and tapping Sync now retry pending work. Conflict resolution compares UTC timestamps; newer state wins, and timestamp ties favor the local mutation. Removals and unwatches use tombstones.
+
+Sign-out preserves local state and pending changes. To prevent cross-account data transfer, a device library binds to the first account that syncs; another account is refused on that installation. Use a separate app data profile/device for a different account. Do not clear app data to troubleshoot before deciding what to do with the local library.
+
+To reset a disposable development emulator safely, wait until More shows Synced, then clear app data through Android Settings. This removes that installation's SQLite database and persisted auth session; it does not delete cloud records. Jest uses mocked repositories and does not call Supabase.
+
+No connectivity-listener dependency is installed. Failed sync remains queued and retries when the app returns to the foreground or the user taps Sync now. Watchlist, watched, and episode state remain usable offline.

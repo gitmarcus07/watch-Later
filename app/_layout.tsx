@@ -8,10 +8,13 @@ import { GestureHandlerRootView } from 'react-native-gesture-handler';
 import { queryClient } from '@/lib/query/queryClient';
 import { colors } from '@/theme';
 import { logger } from '@/lib/logger';
-import { hydrateSession } from '@/store/app/sessionPersistence';
+import { hydrateSession, persistSession } from '@/store/app/sessionPersistence';
 import { useSessionStore } from '@/store/app/sessionStore';
 import { SqliteDatabaseRepository } from '@/data/local/repositories/SqliteDatabaseRepository';
 import { LoadingView } from '@/components/feedback/FeedbackViews';
+import { supabase } from '@/data/remote/supabase/client';
+import { syncService } from '@/features/sync/SyncService';
+import { watchStateSyncRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
 
 const database = new SqliteDatabaseRepository();
 
@@ -29,8 +32,42 @@ export default function RootLayout() {
   }, []);
 
   useEffect(() => {
+    const authClient = supabase;
+    if (!authClient) return;
+    const { data: subscription } = authClient.auth.onAuthStateChange((event, session) => {
+      if (session?.user) {
+        const authenticated = { mode: 'authenticated' as const, userId: session.user.id, email: session.user.email ?? '' };
+        setTimeout(() => {
+          void watchStateSyncRepository.bindAccount(session.user.id).then(async () => {
+            const current = useSessionStore.getState();
+            current.setSession(authenticated);
+            await persistSession(authenticated, current.onboardingComplete);
+            if (event === 'SIGNED_IN' || event === 'INITIAL_SESSION' || event === 'TOKEN_REFRESHED') void syncService.sync(session.user.id).catch(() => undefined);
+          }).catch(async () => {
+            await authClient.auth.signOut();
+            const current = useSessionStore.getState();
+            const guest = { mode: 'guest' as const, userId: `guest-${Date.now()}` };
+            current.setSession(guest);
+            await persistSession(guest, current.onboardingComplete);
+          });
+        }, 0);
+      } else if (event === 'SIGNED_OUT' && useSessionStore.getState().session.mode === 'authenticated') {
+        const current = useSessionStore.getState();
+        const guest = { mode: 'guest' as const, userId: `guest-${Date.now()}` };
+        current.setSession(guest);
+        void persistSession(guest, current.onboardingComplete);
+      }
+    });
+    return () => subscription.subscription.unsubscribe();
+  }, []);
+
+  useEffect(() => {
     const subscription = AppState.addEventListener('change', (state) => {
-      if (state === 'active') void queryClient.resumePausedMutations();
+      if (state === 'active') {
+        void queryClient.resumePausedMutations();
+        const session = useSessionStore.getState().session;
+        if (session.mode === 'authenticated') void syncService.sync(session.userId).catch(() => undefined);
+      }
     });
     return () => subscription.remove();
   }, []);

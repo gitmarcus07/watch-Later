@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import { AppError } from '@/domain/errors/AppError';
 
-export const DATABASE_VERSION = 3;
+export const DATABASE_VERSION = 4;
 
 const migrations: Record<number, readonly string[]> = {
   1: [
@@ -117,6 +117,30 @@ const migrations: Record<number, readonly string[]> = {
   // Re-check the Phase 4 schema because earlier development builds may already
   // have recorded version 2 with a partial tracked_media table.
   3: [],
+  4: [
+    `CREATE TABLE IF NOT EXISTS sync_queue (
+      id INTEGER PRIMARY KEY AUTOINCREMENT,
+      entity_type TEXT NOT NULL CHECK (entity_type IN ('watchlist', 'movie', 'series', 'episode')),
+      entity_key TEXT NOT NULL,
+      provider TEXT NOT NULL CHECK (provider IN ('tmdb', 'anilist')),
+      media_type TEXT NOT NULL CHECK (media_type IN ('movie', 'series', 'anime')),
+      provider_id TEXT NOT NULL,
+      season_number INTEGER,
+      episode_number INTEGER,
+      is_deleted INTEGER NOT NULL CHECK (is_deleted IN (0, 1)),
+      updated_at TEXT NOT NULL,
+      payload TEXT NOT NULL,
+      retry_count INTEGER NOT NULL DEFAULT 0,
+      last_error TEXT,
+      UNIQUE (entity_type, entity_key)
+    );`,
+    `CREATE INDEX IF NOT EXISTS idx_sync_queue_updated ON sync_queue(updated_at, id);`,
+    `CREATE TABLE IF NOT EXISTS account_binding (
+      id INTEGER PRIMARY KEY CHECK (id = 1),
+      account_id TEXT NOT NULL,
+      bound_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );`,
+  ],
 };
 
 async function ensureTrackedMediaColumns(database: SQLiteDatabase): Promise<void> {

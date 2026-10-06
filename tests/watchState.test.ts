@@ -1,4 +1,5 @@
 import type { CatalogMedia, CatalogSeason, MediaEpisode } from '@/domain/models/media';
+import type { PendingWatchStateChange } from '@/domain/models/watchState';
 import { mapAniListAnime } from '@/data/remote/anilist/mappers';
 import { mapTmdbMovie, mapTmdbTv } from '@/data/remote/tmdb/mappers';
 import { runMigrations } from '@/data/local/database/migrations';
@@ -34,12 +35,12 @@ describe('Phase 4 SQLite watch state', () => {
 
   afterEach(() => adapter.close());
 
-  it('migrates a fresh database to version 3 with relational tables and indexes', async () => {
+  it('migrates a fresh database to version 4 with watch state and durable sync tables', async () => {
     const version = await adapter.database.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
     const tables = await adapter.database.getAllAsync<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'");
     const indexes = await adapter.database.getAllAsync<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'");
-    expect(version?.user_version).toBe(3);
-    expect(tables.map(({ name }) => name)).toEqual(expect.arrayContaining(['tracked_media', 'watchlist_entries', 'movie_watches', 'tracked_series', 'tracked_seasons', 'tracked_episodes']));
+    expect(version?.user_version).toBe(4);
+    expect(tables.map(({ name }) => name)).toEqual(expect.arrayContaining(['tracked_media', 'watchlist_entries', 'movie_watches', 'tracked_series', 'tracked_seasons', 'tracked_episodes', 'sync_queue', 'account_binding']));
     expect(indexes.map(({ name }) => name)).toEqual(expect.arrayContaining(['idx_watchlist_added', 'idx_movie_watches_date', 'idx_tracked_series_updated', 'idx_tracked_episodes_series_order', 'idx_tracked_episodes_watched']));
   });
 
@@ -50,7 +51,7 @@ describe('Phase 4 SQLite watch state', () => {
     const preserved = await legacy.database.getFirstAsync<{ value: string }>("SELECT value FROM app_metadata WHERE key = 'install'");
     const versions = await legacy.database.getAllAsync<{ version: number }>('SELECT version FROM schema_migrations ORDER BY version');
     expect(preserved?.value).toBe('kept');
-    expect(versions.map(({ version }) => version)).toEqual([1, 2, 3]);
+    expect(versions.map(({ version }) => version)).toEqual([1, 2, 3, 4]);
     legacy.close();
   });
 
@@ -83,6 +84,33 @@ describe('Phase 4 SQLite watch state', () => {
     expect(await reloaded.getWatchlist()).toHaveLength(0);
     await reloaded.markMovieWatched(movie, false);
     expect(await reloaded.getWatchedLibrary()).toHaveLength(0);
+  });
+
+  it('persists pending watchlist, movie and episode sync work across repository reloads and coalesces rapid mutations', async () => {
+    const movie = createMovie(314);
+    await repository.addToWatchlist(movie);
+    await repository.removeFromWatchlist(movie);
+    await repository.markMovieWatched(movie, true);
+    await repository.markMovieWatched(movie, false);
+    const pending = await repository.getPendingChanges();
+    expect(pending.filter((change) => change.entityType === 'watchlist')).toHaveLength(1);
+    expect(pending.find((change) => change.entityType === 'watchlist')?.deleted).toBe(true);
+    expect(pending.find((change) => change.entityType === 'movie')?.deleted).toBe(true);
+    await repository.bindAccount('user-a');
+    expect(await repository.getBoundAccount()).toBe('user-a');
+    await expect(repository.bindAccount('user-b')).rejects.toThrow('linked to another account');
+    const reloaded = new SqliteWatchStateRepository(async () => adapter.database);
+    expect(await reloaded.getPendingChanges()).toHaveLength(pending.length);
+  });
+
+  it('applies remote episode state without creating a sync loop or resurrecting stopped series tracking', async () => {
+    const series = createSeries();
+    const episode = createEpisode(series, 3);
+    const remote: PendingWatchStateChange = { id: -1, entityType: 'episode', entityKey: `${series.id}:1:3`, provider: 'tmdb', mediaType: 'series', providerId: episode.providerId, seasonNumber: 1, episodeNumber: 3, deleted: false, updatedAt: '2026-10-06T10:00:00.000Z', watchedAt: '2026-10-06T09:00:00.000Z', media: series, episode, retryCount: 0 };
+    await repository.applyRemoteChanges([remote]);
+    expect(await repository.getEpisodeWatched(episode)).toBe(true);
+    expect(await repository.isSeriesTracked(series)).toBe(false);
+    expect(await repository.getPendingChanges()).toEqual([]);
   });
 
   it('keeps provider-qualified identities separate for identical numeric IDs', async () => {

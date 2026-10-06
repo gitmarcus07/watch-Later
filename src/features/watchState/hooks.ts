@@ -2,6 +2,8 @@ import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { CatalogMedia, CatalogSeason, MediaIdentity } from '@/domain/models/media';
 import { catalogRepository } from '@/data/remote/catalog/RemoteCatalogRepository';
 import { watchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
+import { syncService } from '@/features/sync/SyncService';
+import { useSessionStore } from '@/store/app/sessionStore';
 
 export const watchKeys = {
   all: ['watch'] as const,
@@ -15,7 +17,11 @@ export const watchKeys = {
 
 function useInvalidateWatchState() {
   const queryClient = useQueryClient();
-  return () => queryClient.invalidateQueries({ queryKey: watchKeys.all });
+  return (sync = false) => {
+    void queryClient.invalidateQueries({ queryKey: watchKeys.all });
+    const session = useSessionStore.getState().session;
+    if (sync && session.mode === 'authenticated') void syncService.sync(session.userId).catch(() => undefined);
+  };
 }
 
 export function useWatchlist() {
@@ -97,7 +103,7 @@ export function useToggleWatchlist(media: CatalogMedia) {
   const state = useWatchlistStatus(media);
   const mutation = useMutation({
     mutationFn: () => state.data ? watchStateRepository.removeFromWatchlist(media) : watchStateRepository.addToWatchlist(media),
-    onSuccess: invalidate,
+    onSuccess: () => invalidate(true),
   });
   return { ...state, toggle: mutation.mutate, toggleAsync: mutation.mutateAsync, isMutating: mutation.isPending };
 }
@@ -106,7 +112,7 @@ export function useWatchlistMutation(media: CatalogMedia, currentlySaved: boolea
   const invalidate = useInvalidateWatchState();
   const mutation = useMutation({
     mutationFn: () => currentlySaved ? watchStateRepository.removeFromWatchlist(media) : watchStateRepository.addToWatchlist(media),
-    onSuccess: invalidate,
+    onSuccess: () => invalidate(true),
   });
   return mutation;
 }
@@ -115,7 +121,7 @@ export function useMovieWatchedMutation(media: CatalogMedia, currentlyWatched: b
   const invalidate = useInvalidateWatchState();
   return useMutation({
     mutationFn: () => watchStateRepository.markMovieWatched(media, !currentlyWatched),
-    onSuccess: invalidate,
+    onSuccess: () => invalidate(true),
   });
 }
 
@@ -123,7 +129,7 @@ export function useSeriesTrackingMutation(media: CatalogMedia, currentlyTracked:
   const invalidate = useInvalidateWatchState();
   return useMutation({
     mutationFn: () => currentlyTracked ? watchStateRepository.stopTrackingSeries(media) : watchStateRepository.startTrackingSeries(media),
-    onSuccess: invalidate,
+    onSuccess: () => invalidate(true),
   });
 }
 
@@ -132,7 +138,7 @@ export function useToggleMovieWatched(media: CatalogMedia) {
   const state = useMovieWatchedStatus(media);
   const mutation = useMutation({
     mutationFn: () => watchStateRepository.markMovieWatched(media, !state.data),
-    onSuccess: invalidate,
+    onSuccess: () => invalidate(true),
   });
   return { ...state, toggle: mutation.mutate, toggleAsync: mutation.mutateAsync, isMutating: mutation.isPending };
 }
@@ -142,7 +148,7 @@ export function useStartTrackingSeries(media: CatalogMedia) {
   const state = useSeriesTrackingStatus(media);
   const mutation = useMutation({
     mutationFn: () => state.data ? watchStateRepository.stopTrackingSeries(media) : watchStateRepository.startTrackingSeries(media),
-    onSuccess: invalidate,
+    onSuccess: () => invalidate(true),
   });
   return { ...state, toggle: mutation.mutate, toggleAsync: mutation.mutateAsync, isMutating: mutation.isPending };
 }
@@ -151,7 +157,7 @@ export function useStoreSeason(media: CatalogMedia) {
   const invalidate = useInvalidateWatchState();
   return useMutation({
     mutationFn: (season: CatalogSeason) => watchStateRepository.storeSeason(media, season.seasonNumber, season.name, season.episodes.length, season.overview, season.airDate, season.posterUrl, season.episodes),
-    onSuccess: invalidate,
+    onSuccess: () => invalidate(false),
   });
 }
 
@@ -160,7 +166,7 @@ export function useToggleEpisode(media: CatalogMedia, season: CatalogSeason) {
   const episodes = useWatchedEpisodeIds(media, season.seasonNumber);
   const mutation = useMutation({
     mutationFn: ({ episode, watched }: { episode: CatalogSeason['episodes'][number]; watched: boolean }) => watchStateRepository.setEpisodeWatched(media, season, episode, watched),
-    onSuccess: invalidate,
+    onSuccess: () => invalidate(true),
   });
   return { ...mutation, watchedIds: episodes.data ?? [], toggle: mutation.mutate, isMutating: mutation.isPending };
 }
@@ -169,7 +175,7 @@ export function useToggleSeason(media: CatalogMedia, seasonNumber: number) {
   const invalidate = useInvalidateWatchState();
   return useMutation({
     mutationFn: ({ watched, season }: { watched: boolean; season: CatalogSeason }) => watchStateRepository.setSeasonWatched(media, season, watched),
-    onSuccess: invalidate,
+    onSuccess: () => invalidate(true),
   });
 }
 
@@ -186,7 +192,7 @@ export function useSetSeriesWatched(media: CatalogMedia) {
       }));
       return watchStateRepository.setSeriesWatched(media, seasons, watched);
     },
-    onSuccess: invalidate,
+    onSuccess: () => invalidate(true),
   });
 }
 

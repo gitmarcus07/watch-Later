@@ -2,6 +2,7 @@ import type { CatalogMedia, CatalogSeason, MediaEpisode, MediaIdentity } from '.
 
 export interface WatchlistEntry {
   media: CatalogMedia;
+  watchedAt?: string;
   addedAt: string;
 }
 
@@ -57,4 +58,38 @@ export interface WatchStateRepository {
   getSeriesProgress(): Promise<SeriesProgress[]>;
   getContinueWatching(): Promise<ContinueWatchingItem[]>;
   getWatchedLibrary(): Promise<WatchedLibraryItem[]>;
+}
+
+export type SyncEntityType = 'watchlist' | 'movie' | 'series' | 'episode';
+
+export interface PendingWatchStateChange {
+  id: number;
+  entityType: SyncEntityType;
+  entityKey: string;
+  provider: MediaIdentity['provider'];
+  mediaType: MediaIdentity['mediaType'];
+  providerId: string;
+  seasonNumber?: number;
+  episodeNumber?: number;
+  deleted: boolean;
+  updatedAt: string;
+  media: CatalogMedia;
+  watchedAt?: string;
+  episode?: MediaEpisode;
+  retryCount: number;
+}
+
+export interface CloudWatchStateRepository {
+  getAuthenticatedUserId(): Promise<string | undefined>;
+  fetch(userId: string): Promise<PendingWatchStateChange[]>;
+  upsert(userId: string, changes: PendingWatchStateChange[]): Promise<void>;
+}
+
+export interface WatchStateSyncRepository {
+  getPendingChanges(): Promise<PendingWatchStateChange[]>;
+  applyRemoteChanges(changes: PendingWatchStateChange[]): Promise<void>;
+  markSynced(changes: PendingWatchStateChange[]): Promise<void>;
+  recordSyncFailure(changes: PendingWatchStateChange[], safeMessage: string): Promise<void>;
+  bindAccount(accountId: string): Promise<void>;
+  getBoundAccount(): Promise<string | undefined>;
 }
