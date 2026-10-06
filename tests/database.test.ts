@@ -8,7 +8,7 @@ describe('local database foundation', () => {
     const statements: string[] = [];
     const transaction = {
       execAsync: jest.fn(async (sql: string) => { statements.push(sql); }),
-      getAllAsync: jest.fn(async () => appliedVersions.map((version) => ({ version }))),
+      getAllAsync: jest.fn(async (sql: string) => sql.includes('schema_migrations') ? appliedVersions.map((version) => ({ version })) : [{ name: 'id' }]),
       runAsync: jest.fn(async (_sql: string, version?: number) => {
         if (version !== undefined) appliedVersions.push(version);
         return {} as SQLiteRunResult;
@@ -20,10 +20,10 @@ describe('local database foundation', () => {
 
     await runMigrations(database);
     expect(database.withExclusiveTransactionAsync).toHaveBeenCalledTimes(1);
-    expect(appliedVersions).toEqual([1]);
+    expect(appliedVersions).toEqual([1, 2, 3]);
     expect(statements.some((sql) => sql.includes('content_references'))).toBe(true);
     await runMigrations(database);
-    expect(appliedVersions).toEqual([1]);
+    expect(appliedVersions).toEqual([1, 2, 3]);
   });
 
   it('exposes initialization through a repository boundary', async () => {

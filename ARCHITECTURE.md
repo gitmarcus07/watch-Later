@@ -10,7 +10,7 @@ The intended dependency direction is UI → feature/use case → domain contract
 
 - Zustand contains client state only: session mode, onboarding completion, and future UI preferences.
 - AsyncStorage persists the small session/onboarding envelope. Guest content belongs in SQLite, never Zustand.
-- TanStack Query is configured for remote/server state and is not used as a local user-data database.
+- TanStack Query owns remote catalog/server state and is not used as a local user-data database.
 - Expo SQLite is the source of truth for future guest-owned watch data.
 
 ## Local database
@@ -25,11 +25,13 @@ Session is a discriminated union: `unauthenticated`, `guest`, or `authenticated`
 
 `GuestMigrationService` marks the boundary for a future migration: prepare/export, upload/associate, conflict resolution, and completion metadata. Its current implementation is explicitly a stub; no local data is deleted or uploaded automatically.
 
-## Supabase and future TMDb
+## Supabase and remote media catalog
 
 Supabase is initialized in `src/data/remote/supabase/client.ts` only when public URL and anon key are configured. Session persistence uses AsyncStorage; the service-role key must never ship in the client. RLS and cloud synchronization are later work.
 
-The TMDb boundary is reserved under `src/data/remote/tmdb/` when implemented. API calls and caching should be owned by repositories/query functions. The public TMDb key variable is only an example; no TMDb request is made in Phase 1.
+Catalog screens call feature query hooks, which use the domain `CatalogRepository` contract and its remote implementation. TMDb and AniList API clients and provider response mappers live under `src/data/remote/`; UI components receive only normalized domain media and episode models. Provider-qualified IDs preserve catalog identity across sources. TanStack Query caches search, detail, and season requests in memory. AniList currently supplies anime metadata but not episode-level data through the selected public query.
+
+Expo client variables use the `EXPO_PUBLIC_` prefix and are embedded in the app bundle. The TMDb API key is therefore a client API credential, not a server secret; keep it local and out of source control and logs. No catalog data is written to SQLite, and watch state remains future work.
 
 ## Navigation
 

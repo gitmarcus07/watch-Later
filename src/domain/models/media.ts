@@ -1,0 +1,78 @@
+export type MediaProvider = 'tmdb' | 'anilist';
+export type CatalogMediaType = 'movie' | 'series' | 'anime';
+
+export interface MediaIdentity {
+  provider: MediaProvider;
+  mediaType: CatalogMediaType;
+  providerId: string;
+}
+
+export interface MediaGenre {
+  id?: number;
+  name: string;
+}
+
+export interface SeasonSummary {
+  seasonNumber: number;
+  name: string;
+  episodeCount?: number;
+  airDate?: string;
+  posterUrl?: string;
+}
+
+export interface CatalogMedia extends MediaIdentity {
+  /** Provider-qualified stable ID; never use a provider's numeric ID alone. */
+  id: string;
+  title: string;
+  originalTitle?: string;
+  overview?: string;
+  posterUrl?: string;
+  backdropUrl?: string;
+  releaseDate?: string;
+  year?: number;
+  genres: MediaGenre[];
+  rating?: number;
+  voteCount?: number;
+  runtimeMinutes?: number;
+  status?: string;
+  language?: string;
+  originCountries?: string[];
+  numberOfSeasons?: number;
+  numberOfEpisodes?: number;
+  seasonSummaries?: SeasonSummary[];
+  animeFormat?: string;
+  animeSeason?: string;
+  popularity?: number;
+  studios?: string[];
+  episodeMetadata: 'available' | 'unavailable';
+}
+
+export interface MediaEpisode extends MediaIdentity {
+  /** Identity of the parent series/anime. */
+  seriesId: string;
+  seasonNumber: number;
+  episodeNumber: number;
+  title: string;
+  overview?: string;
+  airDate?: string;
+  stillUrl?: string;
+  runtimeMinutes?: number;
+  episodeType?: string;
+}
+
+export interface CatalogSeason {
+  series: MediaIdentity;
+  seasonNumber: number;
+  name: string;
+  overview?: string;
+  airDate?: string;
+  posterUrl?: string;
+  episodes: MediaEpisode[];
+}
+
+export type CatalogFilter = 'all' | 'movies' | 'series' | 'anime';
+
+export interface CatalogSearchResult {
+  items: CatalogMedia[];
+  unavailableProviders: MediaProvider[];
+}

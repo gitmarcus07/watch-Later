@@ -6,7 +6,7 @@ Use Node.js 22.13+ (Node 24 is suitable) and npm. For Android local builds, inst
 
 ## Environment variables
 
-Copy `.env.example` to `.env`. Set `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_ANON_KEY` for account services. Never use the Supabase service-role key in a mobile client. `EXPO_PUBLIC_TMDB_API_KEY` is reserved for a later phase and currently unused. Public Expo variables are bundled into the application and are not suitable for secrets.
+Copy `.env.example` to `.env`. Set `EXPO_PUBLIC_SUPABASE_URL` and `EXPO_PUBLIC_SUPABASE_ANON_KEY` for account services. Set `EXPO_PUBLIC_TMDB_API_KEY` locally to enable TMDb catalog access. The TMDb API key is included in requests from the mobile client and is not a server-side secret; keep it out of source control and logs. `EXPO_PUBLIC_TMDB_BASE`, `EXPO_PUBLIC_TMDB_IMAGE`, and `EXPO_PUBLIC_ANILIST_ENDPOINT` have public defaults. Never use the Supabase service-role key in a mobile client. Expo only inlines `EXPO_PUBLIC_*` variables into application code.
 
 ## Common commands
 

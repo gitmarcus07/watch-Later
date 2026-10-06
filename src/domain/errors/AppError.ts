@@ -1,4 +1,4 @@
-export type AppErrorKind = 'network' | 'database' | 'authentication' | 'validation' | 'unknown';
+export type AppErrorKind = 'network' | 'database' | 'authentication' | 'validation' | 'configuration' | 'catalog' | 'unknown';
 
 export class AppError extends Error {
   constructor(
