@@ -1,9 +1,10 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { useState } from 'react';
-import { Alert, FlatList, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { FlatList, Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AppButton } from '@/components/buttons/AppButton';
 import { IconButton } from '@/components/buttons/IconButton';
+import { showDialog, showToast } from '@/components/feedback/AppDialog';
 import { AppText } from '@/components/common/AppText';
 import { Screen } from '@/components/common/Screen';
 import { EmptyState, ErrorView, LoadingView } from '@/components/feedback/FeedbackViews';
@@ -29,8 +30,8 @@ export default function PickListScreen() {
   const add = (listId: string) => {
     if (!media) return;
     addMutation.mutate({ listId, media }, {
-      onSuccess: () => router.back(),
-      onError: (error) => Alert.alert('Couldn’t add to your list', friendlyErrorMessage(error)),
+      onSuccess: () => { showToast('Saved to list', 'success'); router.back(); },
+      onError: (error) => void showDialog({ type: 'error', title: 'Couldn’t add to your list', message: friendlyErrorMessage(error) }),
     });
   };
 
@@ -38,7 +39,7 @@ export default function PickListScreen() {
     if (!name.trim() || !media) return;
     createMutation.mutate(name.trim(), {
       onSuccess: (list) => { setName(''); add(list.id); },
-      onError: (error) => Alert.alert('Couldn’t create your list', friendlyErrorMessage(error)),
+      onError: (error) => void showDialog({ type: 'error', title: 'Couldn’t create your list', message: friendlyErrorMessage(error) }),
     });
   };
 

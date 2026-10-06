@@ -1,9 +1,10 @@
 import { useRouter } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
-import { Alert, Pressable, StyleSheet, View } from 'react-native';
+import { Pressable, StyleSheet, View } from 'react-native';
 import { useState } from 'react';
 import { AppText } from '@/components/common/AppText';
 import { Screen } from '@/components/common/Screen';
+import { showDialog } from '@/components/feedback/AppDialog';
 import { colors, radius, spacing } from '@/theme';
 import { useSessionStore } from '@/store/app/sessionStore';
 import { useSyncStore } from '@/store/app/syncStore';
@@ -43,7 +44,7 @@ export default function MoreScreen() {
       const guest = { mode: 'guest' as const, userId: `guest-${Date.now()}` };
       setSession(guest);
       await persistSession(guest, onboardingComplete);
-    } catch { Alert.alert('Couldn’t sign out', 'Your local library is unchanged. Please try again.'); }
+    } catch { void showDialog({ type: 'error', title: 'Couldn’t sign out', message: 'Your local library is unchanged. Please try again.' }); }
     finally { setBusy(false); }
   }
   return <Screen scroll><View style={styles.top}><AppText variant="heading1">More</AppText><AppText variant="bodySmall" muted>Your Watch Later space</AppText></View>

@@ -1,7 +1,7 @@
 import { useEffect, useMemo, useState } from 'react';
 import { useLocalSearchParams, useRouter } from 'expo-router';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Alert, Image, ScrollView, StyleSheet, View } from 'react-native';
+import { Image, ScrollView, StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AppText } from '@/components/common/AppText';
 import { IconButton } from '@/components/buttons/IconButton';
@@ -11,6 +11,7 @@ import { friendlyErrorMessage } from '@/lib/friendlyError';
 import { EpisodeList, SeasonSelector } from '@/components/media/EpisodeList';
 import { Screen } from '@/components/common/Screen';
 import { DetailSkeleton, EmptyState, ErrorView, LoadingView } from '@/components/feedback/FeedbackViews';
+import { showDialog } from '@/components/feedback/AppDialog';
 import { CatalogError } from '@/domain/errors/CatalogError';
 import { useCatalogMedia, useCatalogSeason } from '@/features/catalog/hooks';
 import { mediaId, mediaRouteId, parseMediaRouteId } from '@/features/catalog/mediaIdentity';
@@ -57,7 +58,7 @@ export default function MediaDetailScreen() {
   }, [trackingStatus.data, seasonQuery.data, saveSeason]);
   useEffect(() => {
     const error = watchlistMutation.error ?? watchedMutation.error ?? trackingMutation.error ?? episodeMutation.error ?? toggleSeasonMutation.error ?? setSeriesWatchedMutation.error ?? storeSeasonMutation.error ?? favoriteMutation.error;
-    if (error) Alert.alert('Couldn’t update your library', friendlyErrorMessage(error));
+    if (error) void showDialog({ type: 'error', title: 'Couldn’t update your library', message: friendlyErrorMessage(error) });
   }, [watchlistMutation.error, watchedMutation.error, trackingMutation.error, episodeMutation.error, toggleSeasonMutation.error, setSeriesWatchedMutation.error, storeSeasonMutation.error, favoriteMutation.error]);
 
   if (!identity) return <Screen><View style={styles.center}><ErrorView message="This media link is not valid." onRetry={() => router.replace('/(tabs)/search')} /></View></Screen>;

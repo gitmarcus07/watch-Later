@@ -1,9 +1,10 @@
 import { useRouter } from 'expo-router';
 import { useState } from 'react';
-import { Alert, FlatList, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { FlatList, Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AppButton } from '@/components/buttons/AppButton';
 import { IconButton } from '@/components/buttons/IconButton';
+import { showDialog, showToast } from '@/components/feedback/AppDialog';
 import { AppText } from '@/components/common/AppText';
 import { Screen } from '@/components/common/Screen';
 import { EmptyState, ErrorView, LoadingView } from '@/components/feedback/FeedbackViews';
@@ -22,16 +23,21 @@ export default function ListsScreen() {
   const create = () => {
     if (!name.trim()) return;
     createMutation.mutate(name.trim(), {
-      onSuccess: () => setName(''),
-      onError: (error) => Alert.alert('Couldn’t create your list', friendlyErrorMessage(error)),
+      onSuccess: () => { setName(''); showToast('List created', 'success'); },
+      onError: (error) => void showDialog({ type: 'error', title: 'Couldn’t create your list', message: friendlyErrorMessage(error) }),
     });
   };
 
   const remove = (id: string, listName: string) => {
-    Alert.alert('Delete list?', `"${listName}" and its entries will be removed from this device.`, [
-      { text: 'Cancel', style: 'cancel' },
-      { text: 'Delete', style: 'destructive', onPress: () => deleteMutation.mutate(id, { onError: (error) => Alert.alert('Couldn’t delete your list', friendlyErrorMessage(error)) }) },
-    ]);
+    void showDialog({
+      type: 'warning',
+      title: 'Delete list?',
+      message: `"${listName}" and its entries will be removed from this device.`,
+      primaryAction: { label: 'Delete', destructive: true },
+      secondaryAction: { label: 'Cancel' },
+    }).then((confirmed) => {
+      if (confirmed) deleteMutation.mutate(id, { onError: (error) => void showDialog({ type: 'error', title: 'Couldn’t delete your list', message: friendlyErrorMessage(error) }) });
+    });
   };
 
   return <Screen>

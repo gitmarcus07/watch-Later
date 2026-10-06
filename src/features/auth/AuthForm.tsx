@@ -1,11 +1,12 @@
 import { useState } from 'react';
-import { Alert, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
+import { KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
 import { router } from 'expo-router';
 import { Ionicons } from '@expo/vector-icons';
 import { AppText } from '@/components/common/AppText';
 import { AppButton } from '@/components/buttons/AppButton';
 import { IconButton } from '@/components/buttons/IconButton';
 import { Screen } from '@/components/common/Screen';
+import { showDialog } from '@/components/feedback/AppDialog';
 import { SupabaseAuthService } from './SupabaseAuthService';
 import { scheduleAutoSync } from '@/features/sync/autoSync';
 import { persistSession } from '@/store/app/sessionPersistence';
@@ -47,7 +48,7 @@ export function AuthForm({ mode }: { mode: Mode }) {
       const session = await authService.continueAsGuest();
       await persistSession(session, true); setSession(session); setOnboardingComplete(true);
       router.replace('/(tabs)');
-    } catch { Alert.alert('Guest mode unavailable', 'Your local library is safe. Please try again.'); }
+    } catch { void showDialog({ type: 'error', title: 'Guest mode unavailable', message: 'Your local library is safe. Please try again.' }); }
   }
 
   return <Screen scroll><KeyboardAvoidingView behavior={Platform.OS === 'ios' ? 'padding' : undefined} style={styles.root}>

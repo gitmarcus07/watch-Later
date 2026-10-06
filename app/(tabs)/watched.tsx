@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Alert, FlatList, Pressable, StyleSheet, View } from 'react-native';
+import { FlatList, Pressable, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { AppText } from '@/components/common/AppText';
 import { Screen } from '@/components/common/Screen';
 import { EmptyState, ErrorView, LibraryListSkeleton } from '@/components/feedback/FeedbackViews';
+import { showDialog } from '@/components/feedback/AppDialog';
 import { TrackedMediaRow } from '@/components/media/TrackedMediaRow';
 import { useMovieWatchedMutation, useWatchedLibrary } from '@/features/watchState/hooks';
 import { mediaRouteId } from '@/features/catalog/mediaIdentity';
@@ -17,7 +18,7 @@ const filters: { label: string; value: Filter }[] = [{ label: 'All', value: 'all
 
 function MovieRow({ media, onOpen }: { media: CatalogMedia; onOpen: () => void }) {
   const mutation = useMovieWatchedMutation(media, true);
-  useEffect(() => { if (mutation.error) Alert.alert('Couldn’t update watched status', friendlyErrorMessage(mutation.error)); }, [mutation.error]);
+  useEffect(() => { if (mutation.error) void showDialog({ type: 'error', title: 'Couldn’t update watched status', message: friendlyErrorMessage(mutation.error) }); }, [mutation.error]);
   return <TrackedMediaRow media={media} badge="Watched" onPress={onOpen} actionLabel={`Mark ${media.title} unwatched`} actionIcon="checkmark-circle" actionDisabled={mutation.isPending} onAction={() => mutation.mutate()} />;
 }
 

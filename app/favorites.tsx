@@ -1,8 +1,9 @@
 import { useRouter } from 'expo-router';
-import { Alert, FlatList, StyleSheet, View } from 'react-native';
+import { FlatList, StyleSheet, View } from 'react-native';
 import { AppText } from '@/components/common/AppText';
 import { Screen } from '@/components/common/Screen';
 import { IconButton } from '@/components/buttons/IconButton';
+import { showDialog } from '@/components/feedback/AppDialog';
 import { EmptyState, ErrorView, LoadingView } from '@/components/feedback/FeedbackViews';
 import { TrackedMediaRow } from '@/components/media/TrackedMediaRow';
 import { useFavoriteMutation, useFavorites } from '@/features/watchState/hooks';
@@ -13,7 +14,7 @@ import { spacing } from '@/theme';
 
 function FavoriteRow({ media, onOpen }: { media: CatalogMedia; onOpen: () => void }) {
   const mutation = useFavoriteMutation(media, true);
-  return <TrackedMediaRow media={media} onPress={onOpen} actionLabel={`Remove ${media.title} from favorites`} actionIcon="heart" actionDisabled={mutation.isPending} onAction={() => mutation.mutate(undefined, { onError: (error) => Alert.alert('Couldn’t update your favorites', friendlyErrorMessage(error)) })} />;
+  return <TrackedMediaRow media={media} onPress={onOpen} actionLabel={`Remove ${media.title} from favorites`} actionIcon="heart" actionDisabled={mutation.isPending} onAction={() => mutation.mutate(undefined, { onError: (error) => void showDialog({ type: 'error', title: 'Couldn’t update your favorites', message: friendlyErrorMessage(error) }) })} />;
 }
 
 export default function FavoritesScreen() {

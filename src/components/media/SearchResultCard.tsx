@@ -1,8 +1,9 @@
 import { useEffect, useState } from 'react';
 import { LinearGradient } from 'expo-linear-gradient';
-import { Alert, Image, Pressable, StyleSheet, View } from 'react-native';
+import { Image, Pressable, StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AppText } from '@/components/common/AppText';
+import { showDialog } from '@/components/feedback/AppDialog';
 import type { CatalogMedia } from '@/domain/models/media';
 import type { LibraryStatus } from '@/domain/models/watchState';
 import { friendlyErrorMessage } from '@/lib/friendlyError';
@@ -17,7 +18,7 @@ export function SearchResultCard({ media, onPress, status }: { media: CatalogMed
   const action = media.mediaType === 'movie' ? movie : tracking;
   useEffect(() => {
     const error = watchlist.error ?? action.error;
-    if (error) Alert.alert('Couldn’t update your library', friendlyErrorMessage(error));
+    if (error) void showDialog({ type: 'error', title: 'Couldn’t update your library', message: friendlyErrorMessage(error) });
   }, [watchlist.error, action.error]);
   const posterFailed = failedUri === media.posterUrl;
   const typeLabel = media.mediaType === 'movie' ? 'Movie' : media.mediaType === 'series' ? 'TV series' : 'Anime';

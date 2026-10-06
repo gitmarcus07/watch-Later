@@ -1,8 +1,9 @@
 import { useLocalSearchParams, useRouter } from 'expo-router';
-import { Alert, FlatList, StyleSheet, View } from 'react-native';
+import { FlatList, StyleSheet, View } from 'react-native';
 import { AppText } from '@/components/common/AppText';
 import { Screen } from '@/components/common/Screen';
 import { IconButton } from '@/components/buttons/IconButton';
+import { showDialog } from '@/components/feedback/AppDialog';
 import { EmptyState, ErrorView, LoadingView } from '@/components/feedback/FeedbackViews';
 import { TrackedMediaRow } from '@/components/media/TrackedMediaRow';
 import { useCustomList, useRemoveFromCustomList } from '@/features/watchState/hooks';
@@ -21,7 +22,7 @@ export default function ListDetailScreen() {
   const remove = (identity: { provider: 'tmdb' | 'anilist'; mediaType: 'movie' | 'series' | 'anime'; providerId: string }) => {
     if (!listId) return;
     removeMutation.mutate({ listId, identity }, {
-      onError: (error) => Alert.alert('Couldn’t update your list', friendlyErrorMessage(error)),
+      onError: (error) => void showDialog({ type: 'error', title: 'Couldn’t update your list', message: friendlyErrorMessage(error) }),
     });
   };
 

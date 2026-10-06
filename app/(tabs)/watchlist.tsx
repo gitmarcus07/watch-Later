@@ -1,9 +1,10 @@
 import { useEffect, useState } from 'react';
-import { Alert, FlatList, Pressable, StyleSheet, View } from 'react-native';
+import { FlatList, Pressable, StyleSheet, View } from 'react-native';
 import { useRouter } from 'expo-router';
 import { AppText } from '@/components/common/AppText';
 import { Screen } from '@/components/common/Screen';
 import { EmptyState, ErrorView, LibraryListSkeleton } from '@/components/feedback/FeedbackViews';
+import { showDialog } from '@/components/feedback/AppDialog';
 import { TrackedMediaRow } from '@/components/media/TrackedMediaRow';
 import { useWatchlist, useWatchlistMutation } from '@/features/watchState/hooks';
 import { mediaRouteId } from '@/features/catalog/mediaIdentity';
@@ -16,7 +17,7 @@ const filters: { label: string; value: Filter }[] = [{ label: 'All', value: 'all
 
 function WatchlistRow({ media, onOpen }: { media: CatalogMedia; onOpen: () => void }) {
   const mutation = useWatchlistMutation(media, true);
-  useEffect(() => { if (mutation.error) Alert.alert('Couldn’t update your watchlist', friendlyErrorMessage(mutation.error)); }, [mutation.error]);
+  useEffect(() => { if (mutation.error) void showDialog({ type: 'error', title: 'Couldn’t update your watchlist', message: friendlyErrorMessage(mutation.error) }); }, [mutation.error]);
   return <TrackedMediaRow media={media} onPress={onOpen} actionLabel={`Remove ${media.title} from watchlist`} actionIcon="bookmark" actionDisabled={mutation.isPending} onAction={() => mutation.mutate()} />;
 }
 

@@ -15,6 +15,7 @@ import { useNotificationStore } from '@/store/app/notificationStore';
 import { SqliteDatabaseRepository } from '@/data/local/repositories/SqliteDatabaseRepository';
 import { LoadingView } from '@/components/feedback/FeedbackViews';
 import { AppErrorBoundary } from '@/components/feedback/AppErrorBoundary';
+import { DialogProvider } from '@/components/feedback/AppDialog';
 import { supabase } from '@/data/remote/supabase/client';
 import { handleAutoSyncForeground, scheduleAutoSync, startAutoSync } from '@/features/sync/autoSync';
 import { watchStateSyncRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
@@ -86,6 +87,7 @@ export default function RootLayout() {
   return (
     <AppErrorBoundary>
     <GestureHandlerRootView style={styles.root}>
+      <DialogProvider>
       <SafeAreaProvider>
         <QueryClientProvider client={queryClient}>
           <StatusBar style="light" />
@@ -98,6 +100,7 @@ export default function RootLayout() {
           </Stack>
         </QueryClientProvider>
       </SafeAreaProvider>
+      </DialogProvider>
     </GestureHandlerRootView>
     </AppErrorBoundary>
   );
