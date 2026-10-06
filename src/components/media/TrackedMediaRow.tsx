@@ -1,3 +1,4 @@
+import { useState } from 'react';
 import { Image, Pressable, StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AppText } from '@/components/common/AppText';
@@ -8,9 +9,10 @@ export function TrackedMediaRow({ media, subtitle, badge, progress, actionLabel,
   media: CatalogMedia; subtitle?: string; badge?: string; progress?: number; actionLabel?: string; actionIcon?: keyof typeof Ionicons.glyphMap;
   onPress: () => void; onAction?: () => void; actionDisabled?: boolean;
 }) {
+  const [posterFailed, setPosterFailed] = useState(false);
   return <View style={styles.row}>
-    <Pressable accessibilityRole="button" accessibilityLabel={`Open ${media.title}`} onPress={onPress} style={({ pressed }) => [styles.content, pressed && styles.pressed]}>
-      {media.posterUrl ? <Image source={{ uri: media.posterUrl }} style={styles.poster} resizeMode="cover" /> : <View style={[styles.poster, styles.posterFallback]}><Ionicons name="film-outline" size={23} color={colors.accent} /></View>}
+    <Pressable accessibilityRole="button" accessibilityLabel={`Open ${media.title}`} accessibilityHint="Opens title details" onPress={onPress} style={({ pressed }) => [styles.content, pressed && styles.pressed]}>
+      {media.posterUrl && !posterFailed ? <Image source={{ uri: media.posterUrl }} style={styles.poster} resizeMode="cover" onError={() => setPosterFailed(true)} /> : <View style={[styles.poster, styles.posterFallback]}><Ionicons name="film-outline" size={23} color={colors.accent} /></View>}
       <View style={styles.copy}><AppText variant="bodyMedium" numberOfLines={1}>{media.title}</AppText><AppText variant="caption" muted numberOfLines={1}>{subtitle ?? [media.year, media.mediaType === 'movie' ? 'Movie' : media.mediaType === 'series' ? 'TV series' : 'Anime'].filter(Boolean).join(' · ')}</AppText>{badge ? <AppText variant="caption" style={styles.badge}>{badge}</AppText> : null}{typeof progress === 'number' ? <View style={styles.progressTrack}><View style={[styles.progressFill, { width: `${Math.max(0, Math.min(1, progress)) * 100}%` }]} /></View> : null}</View>
     </Pressable>
     {actionLabel && onAction ? <Pressable accessibilityRole="button" accessibilityLabel={actionLabel} accessibilityState={{ disabled: actionDisabled }} disabled={actionDisabled} onPress={onAction} style={({ pressed }) => [styles.action, pressed && styles.pressed, actionDisabled && styles.disabled]}><Ionicons name={actionIcon ?? 'close'} size={20} color={colors.accent} /></Pressable> : null}

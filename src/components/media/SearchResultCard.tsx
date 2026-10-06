@@ -5,6 +5,7 @@ import { Ionicons } from '@expo/vector-icons';
 import { AppText } from '@/components/common/AppText';
 import type { CatalogMedia } from '@/domain/models/media';
 import type { LibraryStatus } from '@/domain/models/watchState';
+import { friendlyErrorMessage } from '@/lib/friendlyError';
 import { useMovieWatchedMutation, useSeriesTrackingMutation, useWatchlistMutation } from '@/features/watchState/hooks';
 import { colors, radius, spacing } from '@/theme';
 
@@ -16,14 +17,14 @@ export function SearchResultCard({ media, onPress, status }: { media: CatalogMed
   const action = media.mediaType === 'movie' ? movie : tracking;
   useEffect(() => {
     const error = watchlist.error ?? action.error;
-    if (error instanceof Error) Alert.alert('Couldn’t update your library', error.message || 'Try again.');
+    if (error) Alert.alert('Couldn’t update your library', friendlyErrorMessage(error));
   }, [watchlist.error, action.error]);
   const posterFailed = failedUri === media.posterUrl;
   const typeLabel = media.mediaType === 'movie' ? 'Movie' : media.mediaType === 'series' ? 'TV series' : 'Anime';
-  return <Pressable accessibilityRole="button" accessibilityLabel={`${media.title}${media.year ? `, ${media.year}` : ''}, ${typeLabel}${media.rating === undefined ? '' : `, rating ${media.rating.toFixed(1)}`}`} onPress={onPress} style={({ pressed }) => [styles.row, pressed && styles.pressed]}>
-    <Pressable accessibilityRole="button" accessibilityLabel={`Open ${media.title}`} onPress={onPress} style={styles.poster}>
+  return <Pressable accessibilityRole="button" accessibilityLabel={`${media.title}${media.year ? `, ${media.year}` : ''}, ${typeLabel}${media.rating === undefined ? '' : `, rating ${media.rating.toFixed(1)}`}`} accessibilityHint="Opens title details" onPress={onPress} style={({ pressed }) => [styles.row, pressed && styles.pressed]}>
+    <View style={styles.poster} accessible={false}>
       {media.posterUrl && !posterFailed ? <Image source={{ uri: media.posterUrl }} style={StyleSheet.absoluteFill} resizeMode="cover" onError={() => setFailedUri(media.posterUrl)} /> : <LinearGradient colors={['#51416C', '#202637']} style={[StyleSheet.absoluteFill, styles.posterFallback]}><AppText variant="caption" style={styles.posterTitle} numberOfLines={3}>{media.title.toUpperCase()}</AppText></LinearGradient>}
-    </Pressable>
+    </View>
     <View style={styles.copy}><AppText variant="bodyMedium" numberOfLines={1}>{media.title}</AppText><AppText variant="caption" muted>{[media.year, typeLabel].filter(Boolean).join(' · ')}</AppText>{media.rating !== undefined ? <View style={styles.rating}><Ionicons name="star" size={13} color={colors.accent} /><AppText variant="caption" muted>{media.rating.toFixed(1)}</AppText></View> : null}</View>
     <View style={styles.actions}>
       <Pressable accessibilityRole="button" accessibilityLabel={`${status?.watchlisted ? 'Remove' : 'Add'} ${media.title} ${status?.watchlisted ? 'from' : 'to'} watchlist`} accessibilityState={{ selected: status?.watchlisted ?? false, disabled: !status || watchlist.isPending }} disabled={!status || watchlist.isPending} onPress={() => watchlist.mutate()} style={[styles.add, status?.watchlisted && styles.added]}><Ionicons name={status?.watchlisted ? 'checkmark' : 'add'} size={21} color={status?.watchlisted ? colors.success : colors.accent} /></Pressable>

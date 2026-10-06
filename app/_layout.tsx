@@ -12,6 +12,7 @@ import { hydrateSession, persistSession } from '@/store/app/sessionPersistence';
 import { useSessionStore } from '@/store/app/sessionStore';
 import { SqliteDatabaseRepository } from '@/data/local/repositories/SqliteDatabaseRepository';
 import { LoadingView } from '@/components/feedback/FeedbackViews';
+import { AppErrorBoundary } from '@/components/feedback/AppErrorBoundary';
 import { supabase } from '@/data/remote/supabase/client';
 import { handleAutoSyncForeground, scheduleAutoSync, startAutoSync } from '@/features/sync/autoSync';
 import { watchStateSyncRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
@@ -75,10 +76,11 @@ export default function RootLayout() {
   useEffect(() => startAutoSync(), []);
 
   if (!hydrated || (!databaseReady && !startupError)) {
-    return <SafeAreaProvider><View style={styles.startup}><StatusBar style="light" /><LoadingView label="Getting things ready" /></View></SafeAreaProvider>;
+    return <AppErrorBoundary><SafeAreaProvider><View style={styles.startup}><StatusBar style="light" /><LoadingView label="Getting things ready" /></View></SafeAreaProvider></AppErrorBoundary>;
   }
 
   return (
+    <AppErrorBoundary>
     <GestureHandlerRootView style={styles.root}>
       <SafeAreaProvider>
         <QueryClientProvider client={queryClient}>
@@ -93,6 +95,7 @@ export default function RootLayout() {
         </QueryClientProvider>
       </SafeAreaProvider>
     </GestureHandlerRootView>
+    </AppErrorBoundary>
   );
 }
 

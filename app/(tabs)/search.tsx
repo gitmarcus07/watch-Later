@@ -46,7 +46,7 @@ export default function SearchScreen() {
     {!normalized ? <View style={styles.empty}><EmptyState icon="search-outline" title="Search for movies, shows and anime" message="Search real catalog metadata from TMDb and AniList." /></View>
       : searching ? <View style={styles.results}><AppText variant="heading3" style={styles.resultTitle}>Searching the catalog</AppText>{[0, 1, 2].map((index) => <SearchResultSkeleton key={index} />)}</View>
       : search.isError ? <View style={styles.error}><ErrorView message={errorMessage} onRetry={() => void search.refetch()} /></View>
-      : !search.data?.items.length ? <View style={styles.empty}><EmptyState icon="search-outline" title="No results found" message="Try another title or explore a different category." /></View>
+      : !search.data?.items.length ? <View style={styles.empty}><EmptyState icon="search-outline" title="No results found" message={`Nothing matched “${debouncedQuery}”. Try another title, check the spelling, or explore a different category.`} actionLabel="Clear search" onAction={() => changeQuery('')} /></View>
       : <View style={styles.results}><AppText variant="heading3" style={styles.resultTitle}>Results</AppText>{search.data.unavailableProviders.length ? <AppText variant="caption" muted style={styles.partial}>{search.data.unavailableProviders.map((provider) => provider === 'tmdb' ? 'TMDb' : 'AniList').join(' and ')} results are temporarily unavailable.</AppText> : null}{search.data.items.map((item) => <SearchResultCard key={item.id} media={item} status={libraryStatuses.data?.[item.id]} onPress={() => openResult(mediaRouteId(item))} />)}</View>}
   </Screen>;
 }
