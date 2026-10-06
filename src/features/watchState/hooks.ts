@@ -10,6 +10,9 @@ export const watchKeys = {
   watched: ['watch', 'watched'] as const,
   progress: ['watch', 'series-progress'] as const,
   continue: ['watch', 'continue'] as const,
+  favorites: ['watch', 'favorites'] as const,
+  lists: ['watch', 'lists'] as const,
+  history: ['watch', 'history'] as const,
   media: (identity: MediaIdentity) => ['watch', 'media', identity.provider, identity.mediaType, identity.providerId] as const,
   episodes: (identity: MediaIdentity, season: number) => ['watch', 'episodes', identity.provider, identity.providerId, season] as const,
 };
@@ -197,4 +200,73 @@ export function useSetSeriesWatched(media: CatalogMedia) {
 export function useWatchStateActions() {
   const invalidate = useInvalidateWatchState();
   return { invalidate };
+}
+
+export function useFavorites() {
+  return useQuery({ queryKey: watchKeys.favorites, queryFn: () => watchStateRepository.getFavorites() });
+}
+
+export function useFavoriteStatus(identity: MediaIdentity | undefined) {
+  return useQuery({
+    queryKey: identity ? [...watchKeys.media(identity), 'favorite'] : ['watch', 'favorite', 'none'],
+    queryFn: () => identity ? watchStateRepository.isFavorite(identity) : Promise.resolve(false),
+    enabled: Boolean(identity),
+  });
+}
+
+export function useFavoriteMutation(media: CatalogMedia, currentlyFavorite: boolean) {
+  const invalidate = useInvalidateWatchState();
+  const mutation = useMutation({
+    mutationFn: () => watchStateRepository.setFavorite(media, !currentlyFavorite),
+    onSuccess: () => invalidate(true),
+  });
+  return mutation;
+}
+
+export function useCustomLists() {
+  return useQuery({ queryKey: watchKeys.lists, queryFn: () => watchStateRepository.getCustomLists() });
+}
+
+export function useCustomList(id: string | undefined) {
+  return useQuery({
+    queryKey: id ? [...watchKeys.lists, id] : ['watch', 'lists', 'none'],
+    queryFn: async () => id ? (await watchStateRepository.getCustomList(id)) ?? null : null,
+    enabled: Boolean(id),
+  });
+}
+
+export function useCreateCustomList() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => watchStateRepository.createCustomList(name),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: watchKeys.lists }); },
+  });
+}
+
+export function useDeleteCustomList() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => watchStateRepository.deleteCustomList(id),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: watchKeys.lists }); },
+  });
+}
+
+export function useAddToCustomList() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ listId, media }: { listId: string; media: CatalogMedia }) => watchStateRepository.addToCustomList(listId, media),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: watchKeys.lists }); },
+  });
+}
+
+export function useRemoveFromCustomList() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ listId, identity }: { listId: string; identity: MediaIdentity }) => watchStateRepository.removeFromCustomList(listId, identity),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: watchKeys.lists }); },
+  });
+}
+
+export function useViewingHistory(limit = 50) {
+  return useQuery({ queryKey: [...watchKeys.history, limit], queryFn: () => watchStateRepository.getViewingHistory(limit) });
 }

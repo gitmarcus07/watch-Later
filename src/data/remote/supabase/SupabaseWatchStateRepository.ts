@@ -22,14 +22,15 @@ export class SupabaseWatchStateRepository implements CloudWatchStateRepository {
 
   async fetch(userId: string): Promise<PendingWatchStateChange[]> {
     const supabaseClient = client();
-    const [mediaResult, watchlistResult, movieResult, seriesResult, episodeResult] = await Promise.all([
+    const [mediaResult, watchlistResult, movieResult, seriesResult, episodeResult, favoriteResult] = await Promise.all([
       supabaseClient.from('library_media').select('*').eq('user_id', userId),
       supabaseClient.from('watchlist_entries').select('*').eq('user_id', userId),
       supabaseClient.from('movie_watches').select('*').eq('user_id', userId),
       supabaseClient.from('tracked_series').select('*').eq('user_id', userId),
       supabaseClient.from('episode_watches').select('*').eq('user_id', userId),
+      supabaseClient.from('favorite_entries').select('*').eq('user_id', userId),
     ]);
-    if (mediaResult.error || watchlistResult.error || movieResult.error || seriesResult.error || episodeResult.error) {
+    if (mediaResult.error || watchlistResult.error || movieResult.error || seriesResult.error || episodeResult.error || favoriteResult.error) {
       throw new AppError('network', 'Could not download your synced library. Your local data is safe.');
     }
     const mediaRows = mediaResult.data;
@@ -67,6 +68,10 @@ export class SupabaseWatchStateRepository implements CloudWatchStateRepository {
       const episode: MediaEpisode = { provider: 'tmdb', mediaType: 'series', providerId: row.episode_provider_id, seriesId: row.series_provider_id, seasonNumber: row.season_number, episodeNumber: row.episode_number, title: row.title, overview: row.overview ?? undefined, airDate: row.air_date ?? undefined, stillUrl: row.still_url ?? undefined, runtimeMinutes: row.runtime_minutes ?? undefined };
       append({ id: -1, entityType: 'episode', entityKey: `${media.id}:${row.season_number}:${row.episode_number}`, provider: 'tmdb', mediaType: 'series', providerId: row.episode_provider_id, seasonNumber: row.season_number, episodeNumber: row.episode_number, deleted: row.is_deleted, updatedAt: row.updated_at, media, watchedAt: row.watched_at ?? undefined, episode, retryCount: 0 });
     }
+    for (const row of favoriteResult.data) {
+      const media = mediaByIdentity.get(mediaId({ provider: row.provider as CatalogMedia['provider'], mediaType: row.media_type as CatalogMedia['mediaType'], providerId: row.provider_id }));
+      if (media) append({ id: -1, entityType: 'favorite', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: row.is_deleted, updatedAt: row.updated_at, media, watchedAt: row.favorited_at, retryCount: 0 });
+    }
     return changes;
   }
 
@@ -91,12 +96,14 @@ export class SupabaseWatchStateRepository implements CloudWatchStateRepository {
       movie: changes.filter(({ entityType }) => entityType === 'movie').map((change) => ({ user_id: userId, provider: change.provider, media_type: change.mediaType, provider_id: change.providerId, watched_at: change.deleted ? null : change.watchedAt ?? change.updatedAt, is_deleted: change.deleted, updated_at: change.updatedAt })),
       series: changes.filter(({ entityType }) => entityType === 'series').map((change) => ({ user_id: userId, provider: change.provider, media_type: change.mediaType, provider_id: change.providerId, tracking_started_at: change.watchedAt ?? change.updatedAt, is_deleted: change.deleted, updated_at: change.updatedAt })),
       episode: changes.filter((change) => change.entityType === 'episode' && change.episode).map((change) => ({ user_id: userId, provider: 'tmdb', episode_provider_id: change.providerId, series_provider: change.media.provider, series_media_type: change.media.mediaType, series_provider_id: change.media.providerId, season_number: change.seasonNumber ?? change.episode?.seasonNumber ?? 0, episode_number: change.episodeNumber ?? change.episode?.episodeNumber ?? 0, title: change.episode?.title ?? 'Episode', overview: change.episode?.overview ?? null, air_date: change.episode?.airDate ?? null, still_url: change.episode?.stillUrl ?? null, runtime_minutes: change.episode?.runtimeMinutes ?? null, watched_at: change.deleted ? null : change.watchedAt ?? change.updatedAt, is_deleted: change.deleted, updated_at: change.updatedAt })),
+      favorite: changes.filter(({ entityType }) => entityType === 'favorite').map((change) => ({ user_id: userId, provider: change.provider, media_type: change.mediaType, provider_id: change.providerId, favorited_at: change.watchedAt ?? change.updatedAt, is_deleted: change.deleted, updated_at: change.updatedAt })),
     };
     const writes = [
       groups.watchlist.length ? supabaseClient.from('watchlist_entries').upsert(groups.watchlist, { onConflict: 'user_id,provider,media_type,provider_id' }) : Promise.resolve({ error: null }),
       groups.movie.length ? supabaseClient.from('movie_watches').upsert(groups.movie, { onConflict: 'user_id,provider,media_type,provider_id' }) : Promise.resolve({ error: null }),
       groups.series.length ? supabaseClient.from('tracked_series').upsert(groups.series, { onConflict: 'user_id,provider,media_type,provider_id' }) : Promise.resolve({ error: null }),
       groups.episode.length ? supabaseClient.from('episode_watches').upsert(groups.episode, { onConflict: 'user_id,episode_provider_id' }) : Promise.resolve({ error: null }),
+      groups.favorite.length ? supabaseClient.from('favorite_entries').upsert(groups.favorite, { onConflict: 'user_id,provider,media_type,provider_id' }) : Promise.resolve({ error: null }),
     ];
     const results = await Promise.all(writes);
     if (results.some(({ error }) => error)) throw new AppError('network', 'Could not sync your latest changes. They will retry later.');

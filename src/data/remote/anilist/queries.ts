@@ -21,3 +21,16 @@ query AnimeDetails($id: Int!) {
     studios(isMain: true) { nodes { name } }
   }
 }`;
+
+export const ANIME_TRENDING_QUERY = `
+query TrendingAnime {
+  Page(page: 1, perPage: 10) {
+    media(type: ANIME, sort: TRENDING_DESC) {
+      id title { romaji english native } description
+      coverImage { large extraLarge } bannerImage
+      startDate { year month day } season seasonYear format status
+      episodes duration genres averageScore popularity
+      studios(isMain: true) { nodes { name } }
+    }
+  }
+}`;

@@ -21,3 +21,19 @@ describe('Supabase watch-state security migration', () => {
     expect(sql).not.toContain('with check (true)');
   });
 });
+
+describe('Supabase favorites security migration', () => {
+  const sql = readFileSync('supabase/migrations/202610060003_favorites.sql', 'utf8').toLowerCase();
+
+  it('enables owner-scoped RLS and grants for favorite_entries', () => {
+    expect(sql).toContain('alter table public.favorite_entries enable row level security');
+    expect(sql).toMatch(/create policy ".*" on public\.favorite_entries for select to authenticated using \(user_id = \(select auth\.uid\(\)\)\)/);
+    expect(sql).toMatch(/create policy ".*" on public\.favorite_entries for insert to authenticated with check \(user_id = \(select auth\.uid\(\)\)\)/);
+    expect(sql).toMatch(/create policy ".*" on public\.favorite_entries for update to authenticated using \(user_id = \(select auth\.uid\(\)\)\) with check \(user_id = \(select auth\.uid\(\)\)\)/);
+    expect(sql).toMatch(/create policy ".*" on public\.favorite_entries for delete to authenticated using \(user_id = \(select auth\.uid\(\)\)\)/);
+    expect(sql).toContain('grant select, insert, update, delete on public.favorite_entries to authenticated');
+    expect(sql).not.toMatch(/to anon|to public\b/);
+    expect(sql).not.toContain('using (true)');
+    expect(sql).not.toContain('with check (true)');
+  });
+});

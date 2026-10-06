@@ -34,3 +34,21 @@ export function useCatalogSeason(identity: MediaIdentity | undefined, seasonNumb
     gcTime: 30 * 60_000,
   });
 }
+
+export function useTrending() {
+  return useQuery({
+    queryKey: ['catalog', 'trending'] as const,
+    queryFn: ({ signal }) => catalogRepository.getTrending(signal),
+    staleTime: 15 * 60_000,
+    gcTime: 60 * 60_000,
+  });
+}
+
+export function useRecentlyReleased() {
+  return useQuery({
+    queryKey: ['catalog', 'recently-released'] as const,
+    queryFn: ({ signal }) => catalogRepository.getRecentlyReleased(signal),
+    staleTime: 30 * 60_000,
+    gcTime: 60 * 60_000,
+  });
+}

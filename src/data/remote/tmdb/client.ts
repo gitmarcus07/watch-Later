@@ -34,4 +34,24 @@ export const tmdbClient = {
     if (!response || !Number.isSafeInteger(response.id) || !Number.isSafeInteger(response.season_number) || typeof response.name !== 'string') throw new CatalogError('tmdb', 'invalid_response');
     return response;
   },
+  async trendingMovies(signal?: AbortSignal) {
+    const response = await requestJson<TmdbListDto<TmdbMovieDto>>('tmdb', buildTmdbUrl('trending/movie/week'), {}, signal);
+    if (!response || !Array.isArray(response.results)) throw new CatalogError('tmdb', 'invalid_response');
+    return response;
+  },
+  async trendingTv(signal?: AbortSignal) {
+    const response = await requestJson<TmdbListDto<TmdbTvDto>>('tmdb', buildTmdbUrl('trending/tv/week'), {}, signal);
+    if (!response || !Array.isArray(response.results)) throw new CatalogError('tmdb', 'invalid_response');
+    return response;
+  },
+  async nowPlayingMovies(signal?: AbortSignal) {
+    const response = await requestJson<TmdbListDto<TmdbMovieDto>>('tmdb', buildTmdbUrl('movie/now_playing'), {}, signal);
+    if (!response || !Array.isArray(response.results)) throw new CatalogError('tmdb', 'invalid_response');
+    return response;
+  },
+  async onTheAirTv(signal?: AbortSignal) {
+    const response = await requestJson<TmdbListDto<TmdbTvDto>>('tmdb', buildTmdbUrl('tv/on_the_air'), {}, signal);
+    if (!response || !Array.isArray(response.results)) throw new CatalogError('tmdb', 'invalid_response');
+    return response;
+  },
 };

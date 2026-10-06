@@ -27,6 +27,35 @@ function isProviderIdentity(identity: MediaIdentity): boolean {
   return (identity.provider === 'tmdb' && (identity.mediaType === 'movie' || identity.mediaType === 'series')) || (identity.provider === 'anilist' && identity.mediaType === 'anime');
 }
 
+/** Round-robin interleave of ranked lists so no single provider dominates. */
+export function interleaveRanked(groups: readonly (readonly CatalogMedia[])[], limit = 15): CatalogMedia[] {
+  const seen = new Set<string>();
+  const merged: CatalogMedia[] = [];
+  const longest = Math.max(0, ...groups.map((group) => group.length));
+  for (let index = 0; index < longest && merged.length < limit; index += 1) {
+    for (const group of groups) {
+      const item = group[index];
+      if (!item || seen.has(item.id)) continue;
+      seen.add(item.id);
+      merged.push(item);
+      if (merged.length >= limit) break;
+    }
+  }
+  return merged;
+}
+
+function orderByRecency(items: readonly CatalogMedia[], limit = 15): CatalogMedia[] {
+  const seen = new Set<string>();
+  return [...items]
+    .sort((a, b) => (b.releaseDate ?? '').localeCompare(a.releaseDate ?? ''))
+    .filter((item) => {
+      if (seen.has(item.id)) return false;
+      seen.add(item.id);
+      return true;
+    })
+    .slice(0, limit);
+}
+
 function numericId(identity: MediaIdentity): number {
   const id = Number(identity.providerId);
   if (!Number.isSafeInteger(id) || id < 1) throw new CatalogError(identity.provider, 'not_found', 404);
@@ -68,6 +97,37 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
     numericId(identity);
     const season = await tmdbClient.getSeason(identity.providerId, seasonNumber, signal);
     return mapTmdbSeason(season, identity);
+  }
+
+  async getTrending(signal?: AbortSignal): Promise<CatalogMedia[]> {
+    const settled = await Promise.allSettled([
+      tmdbClient.trendingMovies(signal).then((response) => response.results.map(mapTmdbMovie)),
+      tmdbClient.trendingTv(signal).then((response) => response.results.map(mapTmdbTv)),
+      anilistClient.trendingAnime(signal).then((media) => media.map(mapAniListAnime)),
+    ]);
+    if (signal?.aborted) throw settled.find((result): result is PromiseRejectedResult => result.status === 'rejected')?.reason;
+    const fulfilled = settled.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+    if (!fulfilled.length) {
+      const reason = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected')?.reason;
+      if (reason instanceof Error) throw reason;
+      throw new CatalogError('tmdb', 'network');
+    }
+    return interleaveRanked(fulfilled);
+  }
+
+  async getRecentlyReleased(signal?: AbortSignal): Promise<CatalogMedia[]> {
+    const settled = await Promise.allSettled([
+      tmdbClient.nowPlayingMovies(signal).then((response) => response.results.map(mapTmdbMovie)),
+      tmdbClient.onTheAirTv(signal).then((response) => response.results.map(mapTmdbTv)),
+    ]);
+    if (signal?.aborted) throw settled.find((result): result is PromiseRejectedResult => result.status === 'rejected')?.reason;
+    const fulfilled = settled.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+    if (!fulfilled.length) {
+      const reason = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected')?.reason;
+      if (reason instanceof Error) throw reason;
+      throw new CatalogError('tmdb', 'network');
+    }
+    return orderByRecency(fulfilled.flat());
   }
 }
 

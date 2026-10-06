@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import { AppError } from '@/domain/errors/AppError';
 import type { CatalogMedia, CatalogSeason, MediaEpisode, MediaIdentity } from '@/domain/models/media';
-import type { ContinueWatchingItem, LibraryStatus, PendingWatchStateChange, SeriesProgress, WatchStateRepository, WatchStateSyncRepository, WatchlistEntry, WatchedLibraryItem } from '@/domain/models/watchState';
+import type { ContinueWatchingItem, CustomListDetail, CustomListSummary, FavoriteEntry, HistoryItem, LibraryStatus, PendingWatchStateChange, SeriesProgress, WatchStateRepository, WatchStateSyncRepository, WatchlistEntry, WatchedLibraryItem } from '@/domain/models/watchState';
 import { getDatabase } from '@/data/local/database/database';
 import { mediaId } from '@/features/catalog/mediaIdentity';
 
@@ -66,13 +66,14 @@ function syncSnapshot(media: CatalogMedia): CatalogMedia {
 
 async function enqueueSyncChange(db: SQLiteDatabase, change: Omit<PendingWatchStateChange, 'id' | 'retryCount'>): Promise<void> {
   await db.runAsync(
-    `INSERT INTO sync_queue (entity_type, entity_key, provider, media_type, provider_id, season_number, episode_number, is_deleted, updated_at, payload)
-     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+    `INSERT INTO sync_queue (entity_type, entity_key, provider, media_type, provider_id, season_number, episode_number, is_deleted, updated_at, payload, media_json)
+     VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
      ON CONFLICT(entity_type, entity_key) DO UPDATE SET provider=excluded.provider, media_type=excluded.media_type, provider_id=excluded.provider_id,
-      season_number=excluded.season_number, episode_number=excluded.episode_number, is_deleted=excluded.is_deleted, updated_at=excluded.updated_at, payload=excluded.payload, last_error=NULL`,
+      season_number=excluded.season_number, episode_number=excluded.episode_number, is_deleted=excluded.is_deleted, updated_at=excluded.updated_at, payload=excluded.payload, media_json=excluded.media_json, last_error=NULL`,
     change.entityType, change.entityKey, change.provider, change.mediaType, change.providerId,
     optional(change.seasonNumber), optional(change.episodeNumber), change.deleted ? 1 : 0, change.updatedAt,
     JSON.stringify({ media: syncSnapshot(change.media), watchedAt: change.watchedAt, episode: change.episode }),
+    JSON.stringify(syncSnapshot(change.media)),
   );
 }
 
@@ -152,6 +153,8 @@ function toProgress(row: SeriesRow, episodes: EpisodeRow[]): SeriesProgress {
 }
 
 export class SqliteWatchStateRepository implements WatchStateRepository, WatchStateSyncRepository {
+  private binding?: { accountId: string; promise: Promise<void> };
+
   constructor(private readonly openDatabase: () => Promise<SQLiteDatabase> = getDatabase) {}
 
   private async run<T>(fallbackMessage: string, action: (database: SQLiteDatabase) => Promise<T>): Promise<T> {
@@ -381,6 +384,113 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
     });
   }
 
+  async setFavorite(media: CatalogMedia, favorite: boolean): Promise<void> {
+    await this.run("Couldn't update your favorites. Try again.", async (db) => {
+      await db.withExclusiveTransactionAsync(async (tx) => {
+        await saveMedia(tx, media);
+        const now = new Date().toISOString();
+        if (favorite) await tx.runAsync('INSERT INTO favorite_entries (media_id, favorited_at, updated_at) VALUES (?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET favorited_at=COALESCE(favorited_at, excluded.favorited_at), updated_at=excluded.updated_at', media.id, now, now);
+        else await tx.runAsync('DELETE FROM favorite_entries WHERE media_id = ?', media.id);
+        await enqueueSyncChange(tx, { entityType: 'favorite', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: !favorite, updatedAt: now, media, watchedAt: favorite ? now : undefined });
+        if (!favorite) await this.pruneMedia(tx, media.id);
+      });
+    });
+  }
+
+  async isFavorite(identity: MediaIdentity): Promise<boolean> {
+    return this.run("Couldn't load favorite status.", async (db) => Boolean(await db.getFirstAsync('SELECT 1 AS found FROM favorite_entries WHERE media_id = ?', mediaId(identity))));
+  }
+
+  async getFavorites(): Promise<FavoriteEntry[]> {
+    return this.run("Couldn't load your favorites.", async (db) => {
+      const rows = await db.getAllAsync<MediaRow & { favorited_at: string }>('SELECT m.*, f.favorited_at FROM favorite_entries f JOIN tracked_media m ON m.id = f.media_id ORDER BY f.favorited_at DESC, m.title COLLATE NOCASE');
+      return rows.map((row) => ({ media: mapMedia(row), favoritedAt: row.favorited_at }));
+    });
+  }
+
+  async createCustomList(name: string): Promise<CustomListSummary> {
+    const trimmed = name.trim();
+    if (!trimmed) throw new AppError('validation', 'Give your list a name.');
+    if (trimmed.length > 80) throw new AppError('validation', 'Keep list names under 80 characters.');
+    return this.run("Couldn't create your list. Try again.", async (db) => {
+      const id = `list-${Date.now().toString(36)}-${Math.random().toString(36).slice(2, 10)}`;
+      const now = new Date().toISOString();
+      await db.runAsync('INSERT INTO custom_lists (id, name, created_at, updated_at) VALUES (?, ?, ?, ?)', id, trimmed, now, now);
+      return { id, name: trimmed, createdAt: now, updatedAt: now, itemCount: 0 };
+    });
+  }
+
+  async deleteCustomList(id: string): Promise<void> {
+    await this.run("Couldn't delete your list. Try again.", async (db) => {
+      await db.runAsync('DELETE FROM custom_lists WHERE id = ?', id);
+    });
+  }
+
+  async getCustomLists(): Promise<CustomListSummary[]> {
+    return this.run("Couldn't load your lists.", async (db) => {
+      const rows = await db.getAllAsync<{ id: string; name: string; created_at: string; updated_at: string; item_count: number }>(
+        `SELECT l.id, l.name, l.created_at, l.updated_at, (SELECT COUNT(*) FROM custom_list_items i WHERE i.list_id = l.id) AS item_count
+         FROM custom_lists l ORDER BY l.updated_at DESC, l.name COLLATE NOCASE`,
+      );
+      return rows.map((row) => ({ id: row.id, name: row.name, createdAt: row.created_at, updatedAt: row.updated_at, itemCount: row.item_count }));
+    });
+  }
+
+  async getCustomList(id: string): Promise<CustomListDetail | undefined> {
+    return this.run("Couldn't load this list.", async (db) => {
+      const list = await db.getFirstAsync<{ id: string; name: string; created_at: string; updated_at: string }>('SELECT * FROM custom_lists WHERE id = ?', id);
+      if (!list) return undefined;
+      const rows = await db.getAllAsync<MediaRow & { added_at: string }>('SELECT m.*, i.added_at FROM custom_list_items i JOIN tracked_media m ON m.id = i.media_id WHERE i.list_id = ? ORDER BY i.added_at DESC, m.title COLLATE NOCASE', id);
+      return { id: list.id, name: list.name, createdAt: list.created_at, updatedAt: list.updated_at, items: rows.map((row) => ({ media: mapMedia(row), addedAt: row.added_at })) };
+    });
+  }
+
+  async addToCustomList(listId: string, media: CatalogMedia): Promise<void> {
+    await this.run("Couldn't add to your list. Try again.", async (db) => {
+      await db.withExclusiveTransactionAsync(async (tx) => {
+        const list = await tx.getFirstAsync('SELECT id FROM custom_lists WHERE id = ?', listId);
+        if (!list) throw new AppError('validation', 'This list no longer exists.');
+        await saveMedia(tx, media);
+        await tx.runAsync('INSERT INTO custom_list_items (list_id, media_id) VALUES (?, ?) ON CONFLICT(list_id, media_id) DO NOTHING', listId, media.id);
+        await tx.runAsync('UPDATE custom_lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', listId);
+      });
+    });
+  }
+
+  async removeFromCustomList(listId: string, identity: MediaIdentity): Promise<void> {
+    await this.run("Couldn't update your list. Try again.", async (db) => {
+      await db.withExclusiveTransactionAsync(async (tx) => {
+        const id = mediaId(identity);
+        await tx.runAsync('DELETE FROM custom_list_items WHERE list_id = ? AND media_id = ?', listId, id);
+        await tx.runAsync('UPDATE custom_lists SET updated_at = CURRENT_TIMESTAMP WHERE id = ?', listId);
+        await this.pruneMedia(tx, id);
+      });
+    });
+  }
+
+  async getViewingHistory(limit = 50): Promise<HistoryItem[]> {
+    const bounded = Number.isSafeInteger(limit) && limit > 0 ? Math.min(limit, 200) : 50;
+    return this.run("Couldn't load your history.", async (db) => {
+      const movies = await db.getAllAsync<MediaRow & { watched_at: string }>('SELECT m.*, w.watched_at FROM movie_watches w JOIN tracked_media m ON m.id = w.media_id ORDER BY w.watched_at DESC LIMIT ?', bounded);
+      const episodes = await db.getAllAsync<EpisodeRow>('SELECT * FROM tracked_episodes WHERE watched_at IS NOT NULL ORDER BY watched_at DESC LIMIT ?', bounded);
+      const seriesIds = [...new Set(episodes.map((episode) => episode.series_id))];
+      const parents = new Map<string, MediaRow>();
+      if (seriesIds.length) {
+        const placeholders = seriesIds.map(() => '?').join(', ');
+        for (const row of await db.getAllAsync<MediaRow>(`SELECT * FROM tracked_media WHERE id IN (${placeholders})`, ...seriesIds)) parents.set(row.id, row);
+      }
+      const items: HistoryItem[] = [
+        ...movies.map((row): HistoryItem => ({ kind: 'movie', media: mapMedia(row), watchedAt: row.watched_at })),
+        ...episodes.flatMap((row): HistoryItem[] => {
+          const parent = parents.get(row.series_id);
+          if (!parent) return [];
+          return [{ kind: 'episode', media: mapMedia(parent), episode: mapEpisode(row), watchedAt: row.watched_at ?? '' }];
+        }),
+      ];
+      return items.sort((a, b) => b.watchedAt.localeCompare(a.watchedAt)).slice(0, bounded);
+    });
+  }
+
   async getPendingChanges(): Promise<PendingWatchStateChange[]> {
     return this.run("Couldn't load pending sync changes.", async (db) => {
       const rows = await db.getAllAsync<{ id: number; entity_type: PendingWatchStateChange['entityType']; entity_key: string; provider: PendingWatchStateChange['provider']; media_type: PendingWatchStateChange['mediaType']; provider_id: string; season_number: number | null; episode_number: number | null; is_deleted: number; updated_at: string; payload: string; retry_count: number }>('SELECT * FROM sync_queue ORDER BY updated_at, id');
@@ -408,6 +518,9 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
           } else if (change.entityType === 'series') {
             if (change.deleted) await tx.runAsync('DELETE FROM tracked_series WHERE media_id = ?', change.media.id);
             else await tx.runAsync('INSERT INTO tracked_series (media_id, tracking_started_at, updated_at) VALUES (?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET updated_at=excluded.updated_at', change.media.id, change.updatedAt, change.updatedAt);
+          } else if (change.entityType === 'favorite') {
+            if (change.deleted) await tx.runAsync('DELETE FROM favorite_entries WHERE media_id = ?', change.media.id);
+            else await tx.runAsync('INSERT INTO favorite_entries (media_id, favorited_at, updated_at) VALUES (?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET updated_at=excluded.updated_at', change.media.id, change.watchedAt ?? change.updatedAt, change.updatedAt);
           } else if (change.episode) {
             await saveMedia(tx, change.media);
             await saveEpisode(tx, change.media, change.episode);
@@ -437,6 +550,18 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
   }
 
   async bindAccount(accountId: string): Promise<void> {
+    if (this.binding) {
+      if (this.binding.accountId === accountId) return this.binding.promise;
+      await this.binding.promise;
+      return this.bindAccount(accountId);
+    }
+    const promise = this.bindAccountOnce(accountId);
+    this.binding = { accountId, promise };
+    try { await promise; }
+    finally { if (this.binding?.promise === promise) this.binding = undefined; }
+  }
+
+  private async bindAccountOnce(accountId: string): Promise<void> {
     await this.run("Couldn't prepare this account's local library.", async (db) => {
       await db.withExclusiveTransactionAsync(async (tx) => {
         const binding = await tx.getFirstAsync<{ account_id: string }>('SELECT account_id FROM account_binding WHERE id = 1');
@@ -447,6 +572,8 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
         for (const row of watchlist) await enqueueSyncChange(tx, { entityType: 'watchlist', entityKey: row.id, provider: row.provider, mediaType: row.media_type, providerId: row.provider_id, deleted: false, updatedAt: row.added_at, media: mapMedia(row) });
         const movies = await tx.getAllAsync<MediaRow & { watched_at: string }>('SELECT m.*, w.watched_at FROM movie_watches w JOIN tracked_media m ON m.id = w.media_id');
         for (const row of movies) await enqueueSyncChange(tx, { entityType: 'movie', entityKey: row.id, provider: row.provider, mediaType: row.media_type, providerId: row.provider_id, deleted: false, updatedAt: row.watched_at, watchedAt: row.watched_at, media: mapMedia(row) });
+        const favorites = await tx.getAllAsync<MediaRow & { favorited_at: string }>('SELECT m.*, f.favorited_at FROM favorite_entries f JOIN tracked_media m ON m.id = f.media_id');
+        for (const row of favorites) await enqueueSyncChange(tx, { entityType: 'favorite', entityKey: row.id, provider: row.provider, mediaType: row.media_type, providerId: row.provider_id, deleted: false, updatedAt: row.favorited_at, watchedAt: row.favorited_at, media: mapMedia(row) });
         const series = await tx.getAllAsync<MediaRow & { updated_at: string }>('SELECT m.*, s.updated_at FROM tracked_series s JOIN tracked_media m ON m.id = s.media_id');
         for (const row of series) await enqueueSyncChange(tx, { entityType: 'series', entityKey: row.id, provider: row.provider, mediaType: row.media_type, providerId: row.provider_id, deleted: false, updatedAt: row.updated_at, media: mapMedia(row) });
         const episodes = await tx.getAllAsync<EpisodeRow>('SELECT * FROM tracked_episodes WHERE watched_at IS NOT NULL');
@@ -468,7 +595,8 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
   private async pruneMedia(db: SQLiteDatabase, id: string): Promise<void> {
     await db.runAsync(
       `DELETE FROM tracked_media WHERE id = ? AND NOT EXISTS (SELECT 1 FROM watchlist_entries WHERE media_id = ?)
-       AND NOT EXISTS (SELECT 1 FROM movie_watches WHERE media_id = ?) AND NOT EXISTS (SELECT 1 FROM tracked_series WHERE media_id = ?)`, id, id, id, id,
+       AND NOT EXISTS (SELECT 1 FROM movie_watches WHERE media_id = ?) AND NOT EXISTS (SELECT 1 FROM tracked_series WHERE media_id = ?)
+       AND NOT EXISTS (SELECT 1 FROM favorite_entries WHERE media_id = ?) AND NOT EXISTS (SELECT 1 FROM custom_list_items WHERE media_id = ?)`, id, id, id, id, id, id,
     );
   }
 }

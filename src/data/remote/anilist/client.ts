@@ -1,7 +1,7 @@
 import { CatalogError } from '@/domain/errors/CatalogError';
 import { catalogConfig } from '@/data/remote/catalog/config';
 import { requestJson } from '@/data/remote/catalog/request';
-import { ANIME_DETAIL_QUERY, ANIME_SEARCH_QUERY } from './queries';
+import { ANIME_DETAIL_QUERY, ANIME_SEARCH_QUERY, ANIME_TRENDING_QUERY } from './queries';
 import type { AniListMediaDto, AniListResponse } from './types';
 
 async function query<T>(queryText: string, variables: Record<string, string | number>, signal?: AbortSignal): Promise<T> {
@@ -27,5 +27,11 @@ export const anilistClient = {
     if (!media) throw new CatalogError('anilist', 'not_found', 404);
     if (!Number.isSafeInteger(media.id)) throw new CatalogError('anilist', 'invalid_response');
     return media;
+  },
+  async trendingAnime(signal?: AbortSignal): Promise<AniListMediaDto[]> {
+    const response = await query<AniListResponse>(ANIME_TRENDING_QUERY, {}, signal);
+    const media = response.data?.Page?.media;
+    if (!Array.isArray(media)) throw new CatalogError('anilist', 'invalid_response');
+    return media.filter((item): item is AniListMediaDto => item !== null && Number.isSafeInteger(item.id));
   },
 };

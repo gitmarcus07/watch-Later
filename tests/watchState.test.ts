@@ -35,13 +35,106 @@ describe('Phase 4 SQLite watch state', () => {
 
   afterEach(() => adapter.close());
 
-  it('migrates a fresh database to version 4 with watch state and durable sync tables', async () => {
+  it('migrates a fresh database to version 7 with watch state and durable sync tables', async () => {
     const version = await adapter.database.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
     const tables = await adapter.database.getAllAsync<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'");
     const indexes = await adapter.database.getAllAsync<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'");
-    expect(version?.user_version).toBe(4);
-    expect(tables.map(({ name }) => name)).toEqual(expect.arrayContaining(['tracked_media', 'watchlist_entries', 'movie_watches', 'tracked_series', 'tracked_seasons', 'tracked_episodes', 'sync_queue', 'account_binding']));
+    expect(version?.user_version).toBe(7);
+    expect(tables.map(({ name }) => name)).toEqual(expect.arrayContaining(['tracked_media', 'watchlist_entries', 'movie_watches', 'tracked_series', 'tracked_seasons', 'tracked_episodes', 'sync_queue', 'account_binding', 'favorite_entries', 'custom_lists', 'custom_list_items']));
     expect(indexes.map(({ name }) => name)).toEqual(expect.arrayContaining(['idx_watchlist_added', 'idx_movie_watches_date', 'idx_tracked_series_updated', 'idx_tracked_episodes_series_order', 'idx_tracked_episodes_watched']));
+  });
+
+  it('preserves a legacy NOT NULL media_json column and supports enqueue and account binding', async () => {
+    const legacy = createSqliteTestAdapter();
+    legacy.raw.exec(`
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+      INSERT INTO schema_migrations(version) VALUES (1), (2), (3), (4), (5);
+      PRAGMA user_version = 5;
+      CREATE TABLE tracked_media (
+        id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, provider_id TEXT NOT NULL, media_type TEXT NOT NULL, title TEXT NOT NULL,
+        original_title TEXT, overview TEXT, poster_url TEXT, backdrop_url TEXT, release_date TEXT, year INTEGER, genres TEXT NOT NULL DEFAULT '[]',
+        rating REAL, vote_count INTEGER, runtime_minutes INTEGER, status TEXT, language TEXT, origin_countries TEXT NOT NULL DEFAULT '[]',
+        number_of_seasons INTEGER, number_of_episodes INTEGER, season_summaries TEXT NOT NULL DEFAULT '[]', anime_format TEXT, anime_season TEXT,
+        popularity INTEGER, studios TEXT NOT NULL DEFAULT '[]', episode_metadata TEXT NOT NULL DEFAULT 'unavailable',
+        created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE watchlist_entries (media_id TEXT PRIMARY KEY NOT NULL, added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+      CREATE TABLE movie_watches (media_id TEXT PRIMARY KEY NOT NULL, watched_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+      CREATE TABLE tracked_series (media_id TEXT PRIMARY KEY NOT NULL, tracking_started_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+      CREATE TABLE tracked_episodes (
+        id TEXT PRIMARY KEY NOT NULL, provider TEXT NOT NULL, provider_id TEXT NOT NULL, series_id TEXT NOT NULL, season_number INTEGER NOT NULL,
+        episode_number INTEGER NOT NULL, title TEXT NOT NULL, overview TEXT, air_date TEXT, still_url TEXT, runtime_minutes INTEGER,
+        watched_at TEXT, created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP, updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+      );
+      CREATE TABLE account_binding (id INTEGER PRIMARY KEY CHECK (id = 1), account_id TEXT NOT NULL, bound_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+      CREATE TABLE sync_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT, entity_type TEXT NOT NULL, entity_key TEXT NOT NULL, provider TEXT NOT NULL, media_type TEXT NOT NULL,
+        provider_id TEXT NOT NULL, season_number INTEGER, episode_number INTEGER, is_deleted INTEGER NOT NULL, updated_at TEXT NOT NULL,
+        payload TEXT NOT NULL, media_json TEXT NOT NULL, retry_count INTEGER NOT NULL DEFAULT 0, last_error TEXT,
+        UNIQUE (entity_type, entity_key)
+      );
+      INSERT INTO sync_queue (entity_type, entity_key, provider, media_type, provider_id, is_deleted, updated_at, payload, retry_count, last_error, media_json)
+      VALUES ('movie', 'legacy:existing', 'tmdb', 'movie', '999', 0, '2026-01-02T03:04:05.000Z', '{}', 3, 'keep this retry', 'legacy media snapshot');
+    `);
+
+    await runMigrations(legacy.database);
+    const legacyRepository = new SqliteWatchStateRepository(async () => legacy.database);
+    const movie = createMovie(987);
+    await legacyRepository.addToWatchlist(movie);
+    await Promise.all([legacyRepository.bindAccount('user-legacy'), legacyRepository.bindAccount('user-legacy')]);
+
+    const retained = await legacy.database.getFirstAsync<{ retry_count: number; last_error: string; media_json: string }>(
+      'SELECT retry_count, last_error, media_json FROM sync_queue WHERE entity_key = ?', 'legacy:existing',
+    );
+    const enqueued = await legacy.database.getFirstAsync<{ payload: string; media_json: string }>(
+      'SELECT payload, media_json FROM sync_queue WHERE entity_key = ?', movie.id,
+    );
+    expect(retained).toEqual({ retry_count: 3, last_error: 'keep this retry', media_json: 'legacy media snapshot' });
+    expect(JSON.parse(enqueued?.payload ?? '{}').media.title).toBe(movie.title);
+    expect(JSON.parse(enqueued?.media_json ?? '{}').title).toBe(movie.title);
+    expect(await legacyRepository.getBoundAccount()).toBe('user-legacy');
+    legacy.close();
+  });
+
+  it('repairs a legacy sync_queue missing payload without losing queued changes', async () => {
+    const legacy = createSqliteTestAdapter();
+    legacy.raw.exec(`
+      CREATE TABLE schema_migrations (version INTEGER PRIMARY KEY NOT NULL, applied_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP);
+      INSERT INTO schema_migrations(version) VALUES (1), (2), (3), (4);
+      CREATE TABLE sync_queue (
+        id INTEGER PRIMARY KEY AUTOINCREMENT,
+        entity_type TEXT NOT NULL,
+        entity_key TEXT NOT NULL,
+        provider TEXT NOT NULL,
+        media_type TEXT NOT NULL,
+        provider_id TEXT NOT NULL,
+        season_number INTEGER,
+        episode_number INTEGER,
+        is_deleted INTEGER NOT NULL,
+        updated_at TEXT NOT NULL,
+        retry_count INTEGER NOT NULL DEFAULT 0,
+        last_error TEXT,
+        UNIQUE (entity_type, entity_key)
+      );
+      INSERT INTO sync_queue (entity_type, entity_key, provider, media_type, provider_id, is_deleted, updated_at, retry_count, last_error)
+      VALUES ('movie', 'tmdb:movie:7', 'tmdb', 'movie', '7', 0, '2026-01-02T03:04:05.000Z', 2, 'retry later');
+    `);
+
+    await runMigrations(legacy.database);
+    const columns = await legacy.database.getAllAsync<{ name: string }>('PRAGMA table_info(sync_queue)');
+    const queued = await legacy.database.getFirstAsync<{ id: number; entity_type: string; entity_key: string; provider_id: string; updated_at: string; payload: string; retry_count: number; last_error: string }>('SELECT * FROM sync_queue WHERE entity_key = ?', 'tmdb:movie:7');
+    const version = await legacy.database.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
+
+    expect(columns.map(({ name }) => name)).toEqual(expect.arrayContaining([
+      'id', 'entity_type', 'entity_key', 'provider', 'media_type', 'provider_id', 'season_number', 'episode_number',
+      'is_deleted', 'updated_at', 'payload', 'retry_count', 'last_error',
+    ]));
+    expect(queued).toMatchObject({ id: 1, entity_type: 'movie', entity_key: 'tmdb:movie:7', provider_id: '7', updated_at: '2026-01-02T03:04:05.000Z', payload: '{}', retry_count: 2, last_error: 'retry later' });
+    expect(version?.user_version).toBe(7);
+
+    await runMigrations(legacy.database);
+    expect(await legacy.database.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM sync_queue')).toEqual({ count: 1 });
+    legacy.close();
   });
 
   it('preserves existing Phase 1 data when applying the new migration', async () => {
@@ -51,7 +144,7 @@ describe('Phase 4 SQLite watch state', () => {
     const preserved = await legacy.database.getFirstAsync<{ value: string }>("SELECT value FROM app_metadata WHERE key = 'install'");
     const versions = await legacy.database.getAllAsync<{ version: number }>('SELECT version FROM schema_migrations ORDER BY version');
     expect(preserved?.value).toBe('kept');
-    expect(versions.map(({ version }) => version)).toEqual([1, 2, 3, 4]);
+    expect(versions.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
     legacy.close();
   });
 

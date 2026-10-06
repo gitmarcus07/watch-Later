@@ -9,6 +9,7 @@ export interface Database {
       movie_watches: Table<CloudStateRow & { watched_at: string | null }>;
       tracked_series: Table<CloudStateRow & { tracking_started_at: string }>;
       episode_watches: Table<CloudEpisodeRow>;
+      favorite_entries: Table<CloudStateRow & { favorited_at: string }>;
       profiles: Table<{ id: string; created_at: string; updated_at: string }>;
     };
     Views: Record<string, never>;

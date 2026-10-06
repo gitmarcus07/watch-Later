@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import { AppError } from '@/domain/errors/AppError';
 
-export const DATABASE_VERSION = 4;
+export const DATABASE_VERSION = 7;
 
 const migrations: Record<number, readonly string[]> = {
   1: [
@@ -141,6 +141,34 @@ const migrations: Record<number, readonly string[]> = {
       bound_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );`,
   ],
+  // Additive repair for development databases that recorded v4 with an older
+  // sync_queue definition. CREATE TABLE IF NOT EXISTS cannot repair columns.
+  5: [],
+  // Keep legacy NOT NULL media_json schemas writable without rebuilding tables.
+  6: [],
+  // Favorites, custom lists, and viewing-history sources. sync_queue is rebuilt
+  // to accept the 'favorite' entity type; existing queued work is preserved.
+  7: [
+    `CREATE TABLE IF NOT EXISTS favorite_entries (
+      media_id TEXT PRIMARY KEY NOT NULL REFERENCES tracked_media(id) ON DELETE CASCADE,
+      favorited_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );`,
+    `CREATE INDEX IF NOT EXISTS idx_favorite_entries_date ON favorite_entries(favorited_at DESC);`,
+    `CREATE TABLE IF NOT EXISTS custom_lists (
+      id TEXT PRIMARY KEY NOT NULL,
+      name TEXT NOT NULL,
+      created_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
+    );`,
+    `CREATE TABLE IF NOT EXISTS custom_list_items (
+      list_id TEXT NOT NULL REFERENCES custom_lists(id) ON DELETE CASCADE,
+      media_id TEXT NOT NULL REFERENCES tracked_media(id) ON DELETE CASCADE,
+      added_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP,
+      PRIMARY KEY (list_id, media_id)
+    );`,
+    `CREATE INDEX IF NOT EXISTS idx_custom_list_items_list ON custom_list_items(list_id, added_at DESC);`,
+  ],
 };
 
 async function ensureTrackedMediaColumns(database: SQLiteDatabase): Promise<void> {
@@ -164,6 +192,72 @@ async function ensureTrackedMediaColumns(database: SQLiteDatabase): Promise<void
   await database.execAsync("UPDATE tracked_media SET provider_id = id WHERE provider_id = '';");
 }
 
+async function ensureSyncQueueColumns(database: SQLiteDatabase): Promise<void> {
+  const columns = await database.getAllAsync<{ name: string }>('PRAGMA table_info(sync_queue)');
+  const present = new Set(columns.map(({ name }) => name));
+  if (!present.size) throw new Error('The sync_queue table is missing after migration.');
+  const additions: [string, string][] = [
+    // Added ids are populated from rowid below; SQLite cannot add a new PK in place.
+    ['id', 'INTEGER'],
+    ['entity_type', "TEXT NOT NULL DEFAULT 'watchlist'"],
+    ['entity_key', "TEXT NOT NULL DEFAULT ''"],
+    ['provider', "TEXT NOT NULL DEFAULT 'tmdb'"],
+    ['media_type', "TEXT NOT NULL DEFAULT 'movie'"],
+    ['provider_id', "TEXT NOT NULL DEFAULT ''"],
+    ['season_number', 'INTEGER'],
+    ['episode_number', 'INTEGER'],
+    ['is_deleted', 'INTEGER NOT NULL DEFAULT 0'],
+    ['updated_at', "TEXT NOT NULL DEFAULT ''"],
+    ['payload', "TEXT NOT NULL DEFAULT '{}'"],
+    ['retry_count', 'INTEGER NOT NULL DEFAULT 0'],
+    ['last_error', 'TEXT'],
+  ];
+  for (const [name, definition] of additions) {
+    if (!present.has(name)) await database.execAsync(`ALTER TABLE sync_queue ADD COLUMN ${name} ${definition};`);
+  }
+  if (!present.has('id')) await database.execAsync('UPDATE sync_queue SET id = rowid WHERE id IS NULL;');
+  if (!present.has('entity_key')) await database.execAsync("UPDATE sync_queue SET entity_key = 'legacy:' || rowid;");
+  if (!present.has('updated_at')) await database.execAsync("UPDATE sync_queue SET updated_at = CURRENT_TIMESTAMP WHERE updated_at = '';");
+}
+
+async function ensureLegacySyncQueueMediaJson(database: SQLiteDatabase): Promise<void> {
+  const columns = await database.getAllAsync<{ name: string }>('PRAGMA table_info(sync_queue)');
+  if (!columns.some(({ name }) => name === 'media_json')) {
+    await database.execAsync('ALTER TABLE sync_queue ADD COLUMN media_json TEXT;');
+  }
+}
+
+async function rebuildSyncQueueForFavorites(database: SQLiteDatabase): Promise<void> {
+  await ensureSyncQueueColumns(database);
+  await ensureLegacySyncQueueMediaJson(database);
+  const definitions = await database.getAllAsync<{ sql: string | null }>("SELECT sql FROM sqlite_master WHERE type = 'table' AND name = 'sync_queue'");
+  if (definitions[0]?.sql?.includes("'favorite'")) return;
+  await database.execAsync(`CREATE TABLE sync_queue_new (
+    id INTEGER PRIMARY KEY AUTOINCREMENT,
+    entity_type TEXT NOT NULL CHECK (entity_type IN ('watchlist', 'movie', 'series', 'episode', 'favorite')),
+    entity_key TEXT NOT NULL,
+    provider TEXT NOT NULL CHECK (provider IN ('tmdb', 'anilist')),
+    media_type TEXT NOT NULL CHECK (media_type IN ('movie', 'series', 'anime')),
+    provider_id TEXT NOT NULL,
+    season_number INTEGER,
+    episode_number INTEGER,
+    is_deleted INTEGER NOT NULL CHECK (is_deleted IN (0, 1)),
+    updated_at TEXT NOT NULL,
+    payload TEXT NOT NULL,
+    media_json TEXT,
+    retry_count INTEGER NOT NULL DEFAULT 0,
+    last_error TEXT,
+    UNIQUE (entity_type, entity_key)
+  );`);
+  await database.execAsync(`INSERT INTO sync_queue_new (id, entity_type, entity_key, provider, media_type, provider_id, season_number, episode_number, is_deleted, updated_at, payload, media_json, retry_count, last_error)
+    SELECT id, entity_type, entity_key, provider, media_type, provider_id, season_number, episode_number, is_deleted, updated_at, payload, media_json, retry_count, last_error FROM sync_queue;`);
+  await database.execAsync('DROP TABLE sync_queue;');
+  await database.execAsync('ALTER TABLE sync_queue_new RENAME TO sync_queue;');
+  await database.execAsync('CREATE INDEX IF NOT EXISTS idx_sync_queue_updated ON sync_queue(updated_at, id);');
+  const sequence = await database.getAllAsync<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'sqlite_sequence'");
+  if (sequence.length) await database.execAsync("UPDATE sqlite_sequence SET seq = COALESCE((SELECT MAX(id) FROM sync_queue), 0) WHERE name = 'sync_queue';");
+}
+
 export async function runMigrations(database: SQLiteDatabase): Promise<void> {
   try {
     await database.withExclusiveTransactionAsync(async (transaction) => {
@@ -180,6 +274,14 @@ export async function runMigrations(database: SQLiteDatabase): Promise<void> {
           for (const statement of migrations[2]) if (statement.startsWith('CREATE TABLE')) await transaction.execAsync(statement);
           await ensureTrackedMediaColumns(transaction);
           for (const statement of migrations[2]) if (statement.includes(' INDEX IF NOT EXISTS ')) await transaction.execAsync(statement);
+        } else if (version === 5) {
+          await ensureSyncQueueColumns(transaction);
+        } else if (version === 6) {
+          await ensureSyncQueueColumns(transaction);
+          await ensureLegacySyncQueueMediaJson(transaction);
+        } else if (version === 7) {
+          for (const statement of statements) await transaction.execAsync(statement);
+          await rebuildSyncQueueForFavorites(transaction);
         } else {
           for (const statement of statements) await transaction.execAsync(statement);
         }

@@ -13,8 +13,8 @@ import { Screen } from '@/components/common/Screen';
 import { DetailSkeleton, EmptyState, ErrorView, LoadingView } from '@/components/feedback/FeedbackViews';
 import { CatalogError } from '@/domain/errors/CatalogError';
 import { useCatalogMedia, useCatalogSeason } from '@/features/catalog/hooks';
-import { mediaId, parseMediaRouteId } from '@/features/catalog/mediaIdentity';
-import { useCachedSeason, useMovieWatchedStatus, useSeriesProgress, useSeriesTrackingStatus, useSetSeriesWatched, useStoreSeason, useToggleEpisode, useToggleSeason, useTrackedMedia, useWatchlistStatus, useWatchlistMutation, useMovieWatchedMutation, useSeriesTrackingMutation } from '@/features/watchState/hooks';
+import { mediaId, mediaRouteId, parseMediaRouteId } from '@/features/catalog/mediaIdentity';
+import { useCachedSeason, useFavoriteMutation, useFavoriteStatus, useMovieWatchedStatus, useSeriesProgress, useSeriesTrackingStatus, useSetSeriesWatched, useStoreSeason, useToggleEpisode, useToggleSeason, useTrackedMedia, useWatchlistStatus, useWatchlistMutation, useMovieWatchedMutation, useSeriesTrackingMutation } from '@/features/watchState/hooks';
 import type { CatalogMedia, CatalogSeason } from '@/domain/models/media';
 import { colors, radius, spacing } from '@/theme';
 
@@ -35,6 +35,8 @@ export default function MediaDetailScreen() {
   const actionMedia = useMemo<CatalogMedia>(() => media ?? (identity ? { ...identity, id: mediaId(identity), title: '', genres: [], episodeMetadata: identity.provider === 'anilist' ? 'unavailable' : 'available' } : { provider: 'tmdb', mediaType: 'movie', providerId: '', id: '', title: '', genres: [], episodeMetadata: 'unavailable' }), [identity, media]);
   const watchlistStatus = useWatchlistStatus(identity);
   const watchlistMutation = useWatchlistMutation(actionMedia, watchlistStatus.data ?? false);
+  const favoriteStatus = useFavoriteStatus(identity);
+  const favoriteMutation = useFavoriteMutation(actionMedia, favoriteStatus.data ?? false);
   const watchedStatus = useMovieWatchedStatus(identity);
   const watchedMutation = useMovieWatchedMutation(actionMedia, watchedStatus.data ?? false);
   const trackingStatus = useSeriesTrackingStatus(identity);
@@ -54,9 +56,9 @@ export default function MediaDetailScreen() {
     if (trackingStatus.data && seasonQuery.data) saveSeason(seasonQuery.data);
   }, [trackingStatus.data, seasonQuery.data, saveSeason]);
   useEffect(() => {
-    const error = watchlistMutation.error ?? watchedMutation.error ?? trackingMutation.error ?? episodeMutation.error ?? toggleSeasonMutation.error ?? setSeriesWatchedMutation.error ?? storeSeasonMutation.error;
+    const error = watchlistMutation.error ?? watchedMutation.error ?? trackingMutation.error ?? episodeMutation.error ?? toggleSeasonMutation.error ?? setSeriesWatchedMutation.error ?? storeSeasonMutation.error ?? favoriteMutation.error;
     if (error) Alert.alert('Couldn’t update your library', friendlyErrorMessage(error));
-  }, [watchlistMutation.error, watchedMutation.error, trackingMutation.error, episodeMutation.error, toggleSeasonMutation.error, setSeriesWatchedMutation.error, storeSeasonMutation.error]);
+  }, [watchlistMutation.error, watchedMutation.error, trackingMutation.error, episodeMutation.error, toggleSeasonMutation.error, setSeriesWatchedMutation.error, storeSeasonMutation.error, favoriteMutation.error]);
 
   if (!identity) return <Screen><View style={styles.center}><ErrorView message="This media link is not valid." onRetry={() => router.replace('/(tabs)/search')} /></View></Screen>;
   if (mediaQuery.isLoading && !media) return <Screen><DetailSkeleton /></Screen>;
@@ -74,6 +76,8 @@ export default function MediaDetailScreen() {
     <FadeInView style={styles.body}>
       <View style={styles.metadata}>{media.rating !== undefined ? <View style={styles.rating}><Ionicons name="star" color={colors.accent} size={16} /><AppText variant="label">{media.rating.toFixed(1)}</AppText></View> : null}{media.runtimeMinutes ? <AppText variant="caption" muted>{media.runtimeMinutes} min</AppText> : null}{media.status ? <AppText variant="caption" muted>{media.status.replaceAll('_', ' ')}</AppText> : null}</View>
       <AppButton label={watchlistStatus.data ? 'Remove from Watchlist' : 'Add to Watchlist'} icon={<Ionicons name={watchlistStatus.data ? 'checkmark' : 'bookmark-outline'} size={18} color={colors.background} />} disabled={watchlistStatus.isLoading || watchlistMutation.isPending} onPress={() => watchlistMutation.mutate()} />
+      <AppButton variant="secondary" label={favoriteStatus.data ? 'Remove from Favorites' : 'Add to Favorites'} icon={<Ionicons name={favoriteStatus.data ? 'heart' : 'heart-outline'} size={18} color={colors.accent} />} disabled={favoriteStatus.isLoading || favoriteMutation.isPending} onPress={() => favoriteMutation.mutate()} />
+      <AppButton variant="text" label="Save to list" onPress={() => router.push({ pathname: '/lists/pick', params: { media: mediaRouteId(actionMedia) } })} />
       {media.mediaType === 'movie' ? <AppButton variant="secondary" label={watchedStatus.data ? 'Mark as Unwatched' : 'Mark as Watched'} icon={<Ionicons name={watchedStatus.data ? 'checkmark-circle' : 'checkmark-circle-outline'} size={18} color={colors.accent} />} disabled={watchedStatus.isLoading || watchedMutation.isPending} onPress={() => watchedMutation.mutate()} /> : <View style={styles.trackingActions}><AppButton variant="secondary" label={trackingStatus.data ? 'Stop Tracking' : 'Start Tracking'} icon={<Ionicons name={trackingStatus.data ? 'pause-circle-outline' : 'play-circle-outline'} size={18} color={colors.accent} />} disabled={trackingStatus.isLoading || trackingMutation.isPending} onPress={() => trackingMutation.mutate()} />{media.provider === 'anilist' ? <AppText variant="caption" muted>Anime episode tracking is unavailable through AniList metadata.</AppText> : null}{progress ? <AppText variant="caption" muted>{progress.watchedEpisodeCount} watched{progress.totalEpisodeCount ? ` / ${progress.totalEpisodeCount} known episodes` : ` / ${progress.cachedEpisodeCount} loaded episodes`}</AppText> : null}</View>}
       <View style={styles.section}><AppText variant="heading3">Overview</AppText><AppText variant="bodySmall" muted style={styles.overview}>{media.overview || 'Overview is not available for this title.'}</AppText>{genres.length ? <View style={styles.tags}>{genres.map((genre) => <View key={genre} style={styles.tag}><AppText variant="caption" muted>{genre}</AppText></View>)}</View> : null}</View>
       {episodic ? <View style={styles.section}><AppText variant="heading3" style={styles.seasonHeading}>{media.mediaType === 'anime' ? 'Episodes' : 'Seasons & episodes'}</AppText>

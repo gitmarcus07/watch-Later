@@ -6,6 +6,36 @@ export interface WatchlistEntry {
   addedAt: string;
 }
 
+export interface FavoriteEntry {
+  media: CatalogMedia;
+  favoritedAt: string;
+}
+
+export interface CustomListSummary {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  itemCount: number;
+}
+
+export interface CustomListItem {
+  media: CatalogMedia;
+  addedAt: string;
+}
+
+export interface CustomListDetail {
+  id: string;
+  name: string;
+  createdAt: string;
+  updatedAt: string;
+  items: CustomListItem[];
+}
+
+export type HistoryItem =
+  | { kind: 'movie'; media: CatalogMedia; watchedAt: string }
+  | { kind: 'episode'; media: CatalogMedia; episode: MediaEpisode; watchedAt: string };
+
 export interface LibraryStatus {
   watchlisted: boolean;
   movieWatched: boolean;
@@ -58,9 +88,19 @@ export interface WatchStateRepository {
   getSeriesProgress(): Promise<SeriesProgress[]>;
   getContinueWatching(): Promise<ContinueWatchingItem[]>;
   getWatchedLibrary(): Promise<WatchedLibraryItem[]>;
+  setFavorite(media: CatalogMedia, favorite: boolean): Promise<void>;
+  isFavorite(identity: MediaIdentity): Promise<boolean>;
+  getFavorites(): Promise<FavoriteEntry[]>;
+  createCustomList(name: string): Promise<CustomListSummary>;
+  deleteCustomList(id: string): Promise<void>;
+  getCustomLists(): Promise<CustomListSummary[]>;
+  getCustomList(id: string): Promise<CustomListDetail | undefined>;
+  addToCustomList(listId: string, media: CatalogMedia): Promise<void>;
+  removeFromCustomList(listId: string, identity: MediaIdentity): Promise<void>;
+  getViewingHistory(limit?: number): Promise<HistoryItem[]>;
 }
 
-export type SyncEntityType = 'watchlist' | 'movie' | 'series' | 'episode';
+export type SyncEntityType = 'watchlist' | 'movie' | 'series' | 'episode' | 'favorite';
 
 export interface PendingWatchStateChange {
   id: number;

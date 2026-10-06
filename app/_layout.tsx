@@ -10,6 +10,8 @@ import { colors } from '@/theme';
 import { logger } from '@/lib/logger';
 import { hydrateSession, persistSession } from '@/store/app/sessionPersistence';
 import { useSessionStore } from '@/store/app/sessionStore';
+import { useAppearanceStore } from '@/store/app/appearanceStore';
+import { useNotificationStore } from '@/store/app/notificationStore';
 import { SqliteDatabaseRepository } from '@/data/local/repositories/SqliteDatabaseRepository';
 import { LoadingView } from '@/components/feedback/FeedbackViews';
 import { AppErrorBoundary } from '@/components/feedback/AppErrorBoundary';
@@ -26,6 +28,8 @@ export default function RootLayout() {
 
   useEffect(() => {
     void hydrateSession();
+    void useAppearanceStore.getState().hydrate();
+    void useNotificationStore.getState().hydrate();
     void database.initialize().then(() => setDatabaseReady(true)).catch((error: unknown) => {
       logger.error('Database startup failed', error);
       setStartupError(true);
