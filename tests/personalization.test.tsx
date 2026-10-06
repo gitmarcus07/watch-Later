@@ -54,3 +54,50 @@ describe('time-based greeting', () => {
     await act(async () => { renderer.unmount(); });
   });
 });
+
+describe('profile avatar', () => {
+  afterEach(() => {
+    useSessionStore.getState().setSession({ mode: 'guest', userId: 'guest-test' });
+  });
+
+  it('shows the guest person icon for guests', async () => {
+    useSessionStore.getState().setSession({ mode: 'guest', userId: 'guest-1' });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<ProfileAvatar />); });
+    const json = renderer.toJSON();
+    expect(json).toMatchObject({ type: 'View' });
+    expect(JSON.stringify(json)).not.toContain('Pressable');
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Guest profile' })).toBeTruthy();
+    renderer.unmount();
+  });
+
+  it('shows the email initial for signed-in users and is not a button', async () => {
+    useSessionStore.getState().setSession({ mode: 'authenticated', userId: 'u-1', email: 'ada@example.com' });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<ProfileAvatar />); });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Your profile picture' })).toBeTruthy();
+    expect(JSON.stringify(renderer.toJSON())).toContain('A');
+    renderer.unmount();
+  });
+
+  it('falls back to the initial when a photo fails to load', async () => {
+    useSessionStore.getState().setSession({ mode: 'authenticated', userId: 'u-1', email: 'ada@example.com' });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<ProfileAvatar photoUrl="https://invalid.example/photo.jpg" />); });
+    const image = renderer.root.findByType(Image);
+    await act(async () => { image.props.onError(); });
+    expect(JSON.stringify(renderer.toJSON())).toContain('A');
+    renderer.unmount();
+  });
+
+  it('updates immediately on sign-out', async () => {
+    useSessionStore.getState().setSession({ mode: 'authenticated', userId: 'u-1', email: 'ada@example.com' });
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<ProfileAvatar />); });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Your profile picture' })).toBeTruthy();
+    await act(async () => { useSessionStore.getState().setSession({ mode: 'guest', userId: 'guest-2' }); });
+    expect(renderer.root.findByProps({ accessibilityLabel: 'Guest profile' })).toBeTruthy();
+    renderer.unmount();
+  });
+});
+

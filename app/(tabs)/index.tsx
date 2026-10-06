@@ -1,9 +1,9 @@
 import { useRouter } from 'expo-router';
-import { Ionicons } from '@expo/vector-icons';
 import { FlatList, StyleSheet, View } from 'react-native';
 import { AppButton } from '@/components/buttons/AppButton';
 import { AppText } from '@/components/common/AppText';
 import { Screen } from '@/components/common/Screen';
+import { ProfileAvatar } from '@/components/profile/ProfileAvatar';
 import { useGreeting } from '@/features/home/greeting';
 import { EmptyState, ErrorView, LoadingView, PosterSkeleton } from '@/components/feedback/FeedbackViews';
 import { ContinueWatchingCard } from '@/components/media/ContinueWatchingCard';
@@ -47,7 +47,7 @@ export default function HomeScreen() {
   const openMedia = (id: string) => router.push({ pathname: '/media/[id]', params: { id } });
 
   return <Screen scroll>
-    <View style={styles.header}><View><AppText variant="caption" muted>YOUR PERSONAL CINEMA</AppText><AppText variant="heading1" style={styles.title}>{greeting}</AppText></View><View style={styles.avatar}><Ionicons name="person-outline" size={20} color={colors.accent} /></View></View>
+    <View style={styles.header}><View><AppText variant="caption" muted>YOUR PERSONAL CINEMA</AppText><AppText variant="heading1" style={styles.title}>{greeting}</AppText></View><ProfileAvatar /></View>
     <View style={styles.section}><SectionHeader title="Continue Watching" />
       {continueQuery.isLoading ? <LoadingView label="Loading your progress" /> : continueQuery.isError ? <ErrorView message="Couldn't load your progress. Try again." onRetry={() => void continueQuery.refetch()} /> : continueQuery.data?.length ? continueQuery.data.map((item) => <ContinueWatchingCard key={item.media.id} title={item.media.title} posterUri={item.media.posterUrl} subtitle={item.nextEpisode ? `S${item.nextEpisode.seasonNumber} E${item.nextEpisode.episodeNumber} · ${item.nextEpisode.title}` : `Continue with Season ${item.nextSeasonNumber}`} progress={item.progress} palette={['#51416C', '#202637']} onPress={() => router.push({ pathname: '/media/[id]', params: { id: mediaRouteId(item.media), season: String(item.nextEpisode?.seasonNumber ?? item.nextSeasonNumber) } })} />) : <View style={styles.emptyCard}><EmptyState icon="play-circle-outline" title="Nothing in progress" message="Track a TV series and mark episodes watched to pick up right where you left off." actionLabel="Find a series" onAction={() => router.push('/(tabs)/search')} /></View>}
     </View>
@@ -57,4 +57,4 @@ export default function HomeScreen() {
   </Screen>;
 }
 
-const styles = StyleSheet.create({ header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: spacing.xl, paddingBottom: spacing['2xl'] }, title: { marginTop: spacing.sm }, avatar: { width: 46, height: 46, borderRadius: 23, backgroundColor: colors.surfaceElevated, borderWidth: 1, borderColor: colors.border, alignItems: 'center', justifyContent: 'center' }, section: { marginBottom: spacing.xl }, emptyCard: { minHeight: 200, borderRadius: radius.card, backgroundColor: colors.surface, padding: spacing.md }, skeletonRow: { flexDirection: 'row', gap: spacing.md, overflow: 'hidden' }, carousel: { gap: spacing.md, paddingRight: spacing.xl }, sectionError: { minHeight: 200 }, discover: { borderRadius: radius.card, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, padding: spacing.xl, gap: spacing.md, marginBottom: spacing['2xl'] }, copy: { lineHeight: 22 } });
+const styles = StyleSheet.create({ header: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', paddingTop: spacing.xl, paddingBottom: spacing['2xl'] }, title: { marginTop: spacing.sm }, section: { marginBottom: spacing.xl }, emptyCard: { minHeight: 200, borderRadius: radius.card, backgroundColor: colors.surface, padding: spacing.md }, skeletonRow: { flexDirection: 'row', gap: spacing.md, overflow: 'hidden' }, carousel: { gap: spacing.md, paddingRight: spacing.xl }, sectionError: { minHeight: 200 }, discover: { borderRadius: radius.card, borderWidth: 1, borderColor: colors.border, backgroundColor: colors.surface, padding: spacing.xl, gap: spacing.md, marginBottom: spacing['2xl'] }, copy: { lineHeight: 22 } });
