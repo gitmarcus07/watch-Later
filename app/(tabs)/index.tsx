@@ -4,6 +4,7 @@ import { FlatList, StyleSheet, View } from 'react-native';
 import { AppButton } from '@/components/buttons/AppButton';
 import { AppText } from '@/components/common/AppText';
 import { Screen } from '@/components/common/Screen';
+import { useGreeting } from '@/features/home/greeting';
 import { EmptyState, ErrorView, LoadingView, PosterSkeleton } from '@/components/feedback/FeedbackViews';
 import { ContinueWatchingCard } from '@/components/media/ContinueWatchingCard';
 import { PosterCard } from '@/components/media/PosterCard';
@@ -37,6 +38,7 @@ function DiscoverySection({ title, subtitle, items, isLoading, isError, error, o
 
 export default function HomeScreen() {
   const router = useRouter();
+  const greeting = useGreeting();
   const continueQuery = useContinueWatching();
   const trendingQuery = useTrending();
   const recentQuery = useRecentlyReleased();
@@ -45,7 +47,7 @@ export default function HomeScreen() {
   const openMedia = (id: string) => router.push({ pathname: '/media/[id]', params: { id } });
 
   return <Screen scroll>
-    <View style={styles.header}><View><AppText variant="caption" muted>YOUR PERSONAL CINEMA</AppText><AppText variant="heading1" style={styles.title}>Good evening.</AppText></View><View style={styles.avatar}><Ionicons name="person-outline" size={20} color={colors.accent} /></View></View>
+    <View style={styles.header}><View><AppText variant="caption" muted>YOUR PERSONAL CINEMA</AppText><AppText variant="heading1" style={styles.title}>{greeting}</AppText></View><View style={styles.avatar}><Ionicons name="person-outline" size={20} color={colors.accent} /></View></View>
     <View style={styles.section}><SectionHeader title="Continue Watching" />
       {continueQuery.isLoading ? <LoadingView label="Loading your progress" /> : continueQuery.isError ? <ErrorView message="Couldn't load your progress. Try again." onRetry={() => void continueQuery.refetch()} /> : continueQuery.data?.length ? continueQuery.data.map((item) => <ContinueWatchingCard key={item.media.id} title={item.media.title} posterUri={item.media.posterUrl} subtitle={item.nextEpisode ? `S${item.nextEpisode.seasonNumber} E${item.nextEpisode.episodeNumber} · ${item.nextEpisode.title}` : `Continue with Season ${item.nextSeasonNumber}`} progress={item.progress} palette={['#51416C', '#202637']} onPress={() => router.push({ pathname: '/media/[id]', params: { id: mediaRouteId(item.media), season: String(item.nextEpisode?.seasonNumber ?? item.nextSeasonNumber) } })} />) : <View style={styles.emptyCard}><EmptyState icon="play-circle-outline" title="Nothing in progress" message="Track a TV series and mark episodes watched to pick up right where you left off." actionLabel="Find a series" onAction={() => router.push('/(tabs)/search')} /></View>}
     </View>
