@@ -32,6 +32,7 @@ import {
   setupNotificationHandler,
 } from "@/features/notifications/scheduler";
 import { refreshOttReminders } from "@/features/ott/ottReminders";
+import { refreshUpcomingReminders } from "@/features/notifications/upcomingReminders";
 import { watchStateSyncRepository } from "@/data/local/repositories/SqliteWatchStateRepository";
 
 const database = new SqliteDatabaseRepository();
@@ -134,6 +135,7 @@ export default function RootLayout() {
         if (session.mode === "authenticated") handleAutoSyncForeground();
         void refreshRemindersOnForeground();
         void refreshOttReminders();
+        void refreshUpcomingReminders();
       }
     });
     return () => subscription.remove();

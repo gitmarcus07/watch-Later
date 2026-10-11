@@ -355,11 +355,26 @@ export function useInterestedStatus(identity: MediaIdentity | undefined) {
 export function useInterestedMutation(media: CatalogMedia, currentlyInterested: boolean) {
   const invalidate = useInvalidateWatchState();
   const queryClient = useQueryClient();
+  const key = [...watchKeys.media({ provider: media.provider, mediaType: media.mediaType, providerId: media.providerId }), 'interested'] as const;
   return useMutation({
+    // Flip the bell instantly; the SQLite write lands right after.
+    // Rolls back on failure.
+    onMutate: async () => {
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData<boolean>(key);
+      queryClient.setQueryData<boolean>(key, !currentlyInterested);
+      return { previous };
+    },
+    onError: (_error, _variables, context) => {
+      if (context?.previous !== undefined) queryClient.setQueryData(key, context.previous);
+    },
     mutationFn: () => watchStateRepository.setInterested(media, !currentlyInterested),
     onSuccess: () => {
       invalidate(true);
       void queryClient.invalidateQueries({ queryKey: watchKeys.interestedCounts });
+    },
+    onSettled: () => {
+      void queryClient.invalidateQueries({ queryKey: key });
     },
   });
 }

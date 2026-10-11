@@ -5,7 +5,7 @@ import { AppText } from '@/components/common/AppText';
 import { Screen } from '@/components/common/Screen';
 import { FadeInView } from '@/components/common/FadeInView';
 import { EmptyState, ErrorView, PosterSkeleton } from '@/components/feedback/FeedbackViews';
-import { PosterCard } from '@/components/media/PosterCard';
+import { UpcomingCard } from '@/components/media/UpcomingCard';
 import type { CatalogMedia } from '@/domain/models/media';
 import { CatalogError } from '@/domain/errors/CatalogError';
 import { useUpcomingAnimePages, useUpcomingMoviesPages, useUpcomingSeriesPages } from '@/features/catalog/hooks';
@@ -83,7 +83,7 @@ export default function UpcomingScreen() {
         onEndReachedThreshold={0.5}
         refreshControl={<RefreshControl refreshing={fetchingMore} onRefresh={() => { for (const query of queries) void query.refetch(); }} tintColor={colors.accent} colors={[colors.accent]} />}
         ListFooterComponent={fetchingMore ? <View style={styles.footer}><ActivityIndicator color={colors.accent} /><AppText variant="caption" muted>Loading more…</AppText></View> : !canLoadMore ? <AppText variant="caption" muted style={styles.end}>You have seen it all</AppText> : null}
-        renderItem={({ item }) => <PosterCard title={item.title} subtitle={upcomingSubtitle(item)} posterUri={item.posterUrl} width={cardWidth} onPress={() => openMedia(mediaRouteId(item))} />}
+        renderItem={({ item }) => <UpcomingCard media={item} subtitle={upcomingSubtitle(item)} width={cardWidth} onOpen={() => openMedia(mediaRouteId(item))} />}
       />
       : <EmptyState icon="calendar-outline" title="No upcoming titles" message="Nothing dated in the future right now — check back soon." actionLabel="Browse instead" onAction={() => router.push('/browse')} />}
   </Screen>;
