@@ -4,6 +4,8 @@ import type { CatalogMedia, MediaEpisode } from '@/domain/models/media';
 import type { UpcomingEpisode, WatchlistEntry } from '@/domain/models/watchState';
 import { watchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
 import { useNotificationStore } from '@/store/app/notificationStore';
+import { RELEASE_DAY_CHANNEL_ID, releaseDayTitle } from '@/features/notifications/upcomingReminders';
+import { OTT_NOTIFICATION_SOUND } from '@/features/ott/ottReminders';
 import { logger } from '@/lib/logger';
 
 export const REMINDERS_CHANNEL_ID = 'watch-later-reminders';
@@ -17,6 +19,8 @@ export interface ReminderItem {
   body: string;
   date: Date;
   data: { route: string; mediaId?: string };
+  /** Release-day movie alerts use the branded channel; episodes use the default. */
+  channelId?: string;
 }
 
 export interface ReminderDeps {
@@ -53,12 +57,23 @@ function defaultDeps(): ReminderDeps {
           name: 'Watch Later reminders',
           importance: Notifications.AndroidImportance.DEFAULT,
         });
+        // Release-day movie alerts carry their own channel so the brand
+        // chime plays even for users who never tapped a bell.
+        await Notifications.setNotificationChannelAsync(RELEASE_DAY_CHANNEL_ID, {
+          name: 'Release day',
+          importance: Notifications.AndroidImportance.HIGH,
+          sound: OTT_NOTIFICATION_SOUND,
+        }).catch(() => undefined);
       }
     },
     cancelAll: () => Notifications.cancelAllScheduledNotificationsAsync(),
     schedule: (item) => Notifications.scheduleNotificationAsync({
-      content: { title: item.title, body: item.body, data: item.data },
-      trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date: item.date },
+      content: { title: item.title, body: item.body, data: item.data, sound: OTT_NOTIFICATION_SOUND },
+      trigger: {
+        type: Notifications.SchedulableTriggerInputTypes.DATE,
+        date: item.date,
+        ...(item.channelId ? { channelId: item.channelId } : {}),
+      },
     }),
   };
 }
@@ -110,10 +125,11 @@ export function collectReminders(input: {
       if (date.getTime() - now.getTime() > UPCOMING_MOVIE_DAYS * 24 * 60 * 60 * 1000) continue;
       items.push({
         id: `release:${media.id}`,
-        title: media.title,
-        body: `${media.title} releases today — now on your watchlist.`,
+        title: releaseDayTitle(media.title),
+        body: 'It’s on your Watch Later list — tap to view it.',
         date,
         data: { route: '/media/[id]', mediaId: media.id },
+        channelId: RELEASE_DAY_CHANNEL_ID,
       });
     }
   }

@@ -45,3 +45,18 @@ try {
 }
 
 export const Notifications: NotificationsModule = resolved;
+
+/**
+ * True when push/local-notification natives are absent (Expo Go on Android
+ * throws at import time, which is why the stub above exists). Used to
+ * explain reminder failures honestly instead of a generic error.
+ */
+export function isExpoGoClient(): boolean {
+  try {
+    // eslint-disable-next-line @typescript-eslint/no-require-imports
+    const Constants = require('expo-constants').default as { appOwnership?: string } | undefined;
+    return Constants?.appOwnership === 'expo';
+  } catch {
+    return false;
+  }
+}

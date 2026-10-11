@@ -1,18 +1,23 @@
 import { Platform } from 'react-native';
-import { Notifications } from '@/lib/notifications';
+import { Notifications, isExpoGoClient } from '@/lib/notifications';
 import type { CatalogMedia } from '@/domain/models/media';
 import { watchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
 import { OTT_NOTIFICATION_COLOR, OTT_NOTIFICATION_SOUND } from '@/features/ott/ottReminders';
 import { logger } from '@/lib/logger';
 
-export const UPCOMING_RELEASES_CHANNEL_ID = 'watch-later-releases';
+export const RELEASE_DAY_CHANNEL_ID = 'watch-later-release-day';
 
 export type UpcomingReminderResult =
   | { status: 'scheduled' }
   | { status: 'saved' }
   | { status: 'off' }
   | { status: 'denied' }
-  | { status: 'unavailable' };
+  | { status: 'unavailable'; reason?: 'expo-go' };
+
+/** Unavailable is honest about Expo Go (no native module) vs real failures. */
+function unavailable(): UpcomingReminderResult {
+  return { status: 'unavailable', reason: isExpoGoClient() ? 'expo-go' : undefined };
+}
 
 export function upcomingReminderId(media: Pick<CatalogMedia, 'provider' | 'mediaType' | 'providerId'>): string {
   return `upcoming:${media.provider}:${media.mediaType}:${media.providerId}`;
@@ -39,23 +44,47 @@ export function upcomingNotificationContent(media: Pick<CatalogMedia, 'id' | 'ti
   color: string;
   sound: string;
 } {
-  const premieres = media.mediaType !== 'movie';
   return {
-    title: media.title,
-    body: premieres
-      ? `${media.title} premieres today — tap to track it.`
-      : `${media.title} releases today — tap to mark it watched.`,
+    title: releaseDayTitle(media.title),
+    // Our lists are called Watch Later / Watchlist (there is no ASAP list),
+    // so the body names the real list and the tap action.
+    body: 'It’s on your Watch Later list — tap to view it.',
     data: { route: '/media/[id]', mediaId: media.id },
     color: OTT_NOTIFICATION_COLOR,
     sound: OTT_NOTIFICATION_SOUND,
   };
 }
 
+/**
+ * `{title} is out today`, truncating long titles with an ellipsis so the
+ * suffix always stays visible.
+ */
+export function releaseDayTitle(title: string): string {
+  const suffix = ' is out today';
+  const clean = title.trim() || 'A title you saved';
+  if (`${clean}${suffix}`.length <= 48) return `${clean}${suffix}`;
+  return `${clean.slice(0, 38).trimEnd()}…${suffix}`;
+}
+
+/**
+ * Maps a tapped notification back into the app. Returns null for anything
+ * that is not a known title deep link.
+ */
+export function resolveNotificationTarget(data: { route?: string; mediaId?: string } | null | undefined): {
+  pathname: '/media/[id]';
+  params: { id: string };
+} | null {
+  if (data?.route === '/media/[id]' && data.mediaId) {
+    return { pathname: '/media/[id]', params: { id: data.mediaId } };
+  }
+  return null;
+}
+
 /** Dedicated high-importance channel so release alerts pop + play the brand chime. */
 export async function ensureReleasesChannel(): Promise<void> {
   if (Platform.OS === 'android') {
-    await Notifications.setNotificationChannelAsync(UPCOMING_RELEASES_CHANNEL_ID, {
-      name: 'Upcoming releases',
+    await Notifications.setNotificationChannelAsync(RELEASE_DAY_CHANNEL_ID, {
+      name: 'Release day',
       importance: Notifications.AndroidImportance.HIGH,
       sound: OTT_NOTIFICATION_SOUND,
     }).catch(() => undefined);
@@ -79,13 +108,13 @@ export async function setUpcomingReminder(media: CatalogMedia, enabled: boolean)
     try {
       permission = await Notifications.getPermissionsAsync().then((result) => ({ status: result.status }));
     } catch {
-      return { status: 'unavailable' };
+      return unavailable();
     }
     if (permission.status !== 'granted') {
       try {
         permission = await Notifications.requestPermissionsAsync().then((result) => ({ status: result.status }));
       } catch {
-        return { status: 'unavailable' };
+        return unavailable();
       }
       if (permission.status !== 'granted') return { status: 'denied' };
     }
@@ -99,12 +128,12 @@ export async function setUpcomingReminder(media: CatalogMedia, enabled: boolean)
     await Notifications.scheduleNotificationAsync({
       identifier,
       content,
-      trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date, channelId: UPCOMING_RELEASES_CHANNEL_ID },
+      trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date, channelId: RELEASE_DAY_CHANNEL_ID },
     });
     return { status: 'scheduled' };
   } catch (error) {
     logger.error('Upcoming reminder update failed', error);
-    return { status: 'unavailable' };
+    return unavailable();
   }
 }
 
@@ -131,7 +160,7 @@ function defaultRefreshDeps(): UpcomingRefreshDeps {
       return Notifications.scheduleNotificationAsync({
         identifier: upcomingReminderId(media),
         content,
-        trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date, channelId: UPCOMING_RELEASES_CHANNEL_ID },
+        trigger: { type: Notifications.SchedulableTriggerInputTypes.DATE, date, channelId: RELEASE_DAY_CHANNEL_ID },
       }).then(() => undefined);
     },
   };

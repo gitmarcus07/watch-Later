@@ -13,6 +13,7 @@ import { FadeInView } from '@/components/common/FadeInView';
 import { friendlyErrorMessage } from '@/lib/friendlyError';
 import { triggerLightHaptic, triggerMediumHaptic, triggerSuccessHaptic } from '@/lib/haptics';
 import { SeasonsSection } from '@/components/media/SeasonsSection';
+import { NotifyMeButton } from '@/components/media/NotifyMeButton';
 import { Screen } from '@/components/common/Screen';
 import { DetailSkeleton, ErrorView } from '@/components/feedback/FeedbackViews';
 import { showDialog, showToast } from '@/components/feedback/AppDialog';
@@ -243,7 +244,7 @@ export default function MediaDetailScreen() {
           ))}
         </View>
       ) : null}
-      {upcoming ? <View style={styles.messageCard}><Ionicons name="calendar-outline" size={19} color={colors.accent} /><AppText variant="bodySmall" muted style={styles.messageText}>Releases{releaseLabel ? ` ${releaseLabel}` : ' soon'} — save it to your Watchlist, then mark it watched after release.</AppText></View> : null}
+      {upcoming ? <><View style={styles.messageCard}><Ionicons name="calendar-outline" size={19} color={colors.accent} /><AppText variant="bodySmall" muted style={styles.messageText}>Releases{releaseLabel ? ` ${releaseLabel}` : ' soon'} — save it to your Watchlist, then mark it watched after release.</AppText></View><NotifyMeButton media={media} /></> : null}
       <DetailActions
         primaryLabel={primaryLabel}
         primaryIcon={primaryIcon}

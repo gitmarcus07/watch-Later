@@ -1,4 +1,4 @@
-import { Stack } from "expo-router";
+import { Stack, router } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import * as SplashScreen from "expo-splash-screen";
 import * as Haptics from "expo-haptics";
@@ -31,8 +31,9 @@ import {
   refreshRemindersOnForeground,
   setupNotificationHandler,
 } from "@/features/notifications/scheduler";
+import { Notifications } from "@/lib/notifications";
 import { refreshOttReminders } from "@/features/ott/ottReminders";
-import { refreshUpcomingReminders } from "@/features/notifications/upcomingReminders";
+import { refreshUpcomingReminders, resolveNotificationTarget } from "@/features/notifications/upcomingReminders";
 import { watchStateSyncRepository } from "@/data/local/repositories/SqliteWatchStateRepository";
 
 const database = new SqliteDatabaseRepository();
@@ -142,6 +143,21 @@ export default function RootLayout() {
   }, []);
 
   useEffect(() => startAutoSync(), []);
+
+  // Tapping a release-day alert opens that title. Guarded: Expo Go has no
+  // native notification module, so subscribing must never crash startup.
+  useEffect(() => {
+    try {
+      const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
+        const data = response.notification.request.content.data as { route?: string; mediaId?: string } | null;
+        const target = resolveNotificationTarget(data);
+        if (target) router.replace(target);
+      });
+      return () => subscription.remove();
+    } catch {
+      return undefined;
+    }
+  }, []);
 
   // Ready = local init only (session restore + SQLite). Network sync always runs in the background.
   const appReady = hydrated && (databaseReady || startupError);

@@ -29,9 +29,9 @@ export function ottReminderId(recordId: string): string {
   return `ott:${recordId}`;
 }
 
-export const OTT_PREMIERES_CHANNEL_ID = 'watch-later-premieres';
+export const OTT_PREMIERES_CHANNEL_ID = 'watch-later-premieres-v2';
 export const OTT_NOTIFICATION_COLOR = '#A855F7';
-export const OTT_NOTIFICATION_SOUND = 'notification_sound.wav';
+export const OTT_NOTIFICATION_SOUND = 'wl_now_showing.wav';
 
 export interface OttNotificationRequest {
   identifier: string;

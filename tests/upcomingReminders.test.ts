@@ -3,13 +3,16 @@ import {
   __resetUpcomingRefreshForTests,
   ensureReleasesChannel,
   refreshUpcomingReminders,
+  releaseDayTitle,
+  resolveNotificationTarget,
   setUpcomingReminder,
   upcomingNotificationContent,
   upcomingReminderDate,
   upcomingReminderId,
-  UPCOMING_RELEASES_CHANNEL_ID,
+  RELEASE_DAY_CHANNEL_ID,
   type UpcomingRefreshDeps,
 } from '@/features/notifications/upcomingReminders';
+import { isExpoGoClient } from '@/lib/notifications';
 import type { CatalogMedia } from '@/domain/models/media';
 
 jest.mock('expo-notifications', () => ({
@@ -70,22 +73,44 @@ describe('upcoming reminder scheduling', () => {
     expect(upcomingReminderId(media())).toBe(upcomingReminderId(media({ title: 'Renamed' })));
   });
 
-  it('brands movie and series alerts differently with the app chime', () => {
+  it('uses the spec copy with the app chime for movies and series alike', () => {
     const movie = upcomingNotificationContent(media());
-    expect(movie.body).toContain('releases today');
+    expect(movie.title).toBe('Future Hit is out today');
+    expect(movie.body).toBe('It’s on your Watch Later list — tap to view it.');
     expect(movie.color).toBe('#A855F7');
-    expect(movie.sound).toBe('notification_sound.wav');
+    expect(movie.sound).toBe('wl_now_showing.wav');
     expect(movie.data).toMatchObject({ route: '/media/[id]', mediaId: 'tmdb:movie:42' });
     const series = upcomingNotificationContent(media({ mediaType: 'series', id: 'tmdb:series:7', title: 'Soon Show' }));
-    expect(series.body).toContain('premieres today');
+    expect(series.title).toBe('Soon Show is out today');
+    expect(series.body).toBe('It’s on your Watch Later list — tap to view it.');
+  });
+
+  it('truncates long titles but keeps the suffix visible', () => {
+    expect(releaseDayTitle('Dune: Part Three')).toBe('Dune: Part Three is out today');
+    expect(releaseDayTitle('  padded  ')).toBe('padded is out today');
+    const long = releaseDayTitle('The Lord of the Rings: The Return of the King Extended Edition');
+    expect(long.endsWith('… is out today')).toBe(true);
+    expect(long.startsWith('The Lord of the Rings:')).toBe(true);
+    expect(releaseDayTitle('')).toBe('A title you saved is out today');
+  });
+
+  it('routes title taps to the detail screen and rejects the rest', () => {
+    expect(resolveNotificationTarget({ route: '/media/[id]', mediaId: 'tmdb:movie:42' })).toEqual({
+      pathname: '/media/[id]',
+      params: { id: 'tmdb:movie:42' },
+    });
+    expect(resolveNotificationTarget(null)).toBeNull();
+    expect(resolveNotificationTarget({})).toBeNull();
+    expect(resolveNotificationTarget({ route: '/other', mediaId: 'x' })).toBeNull();
+    expect(resolveNotificationTarget({ route: '/media/[id]' })).toBeNull();
   });
 
   it('schedules a branded alert on the release channel', async () => {
     const result = await setUpcomingReminder(media(), true);
     expect(result).toEqual({ status: 'scheduled' });
     expect(MockNotifications.setNotificationChannelAsync).toHaveBeenCalledWith(
-      UPCOMING_RELEASES_CHANNEL_ID,
-      expect.objectContaining({ importance: 4, sound: 'notification_sound.wav' }),
+      RELEASE_DAY_CHANNEL_ID,
+      expect.objectContaining({ importance: 4, sound: 'wl_now_showing.wav' }),
     );
     const scheduled = MockNotifications.scheduleNotificationAsync.mock.calls[0][0] as {
       identifier: string;
@@ -93,8 +118,8 @@ describe('upcoming reminder scheduling', () => {
       trigger: { channelId: string };
     };
     expect(scheduled.identifier).toBe('upcoming:tmdb:movie:42');
-    expect(scheduled.content.title).toBe('Future Hit');
-    expect(scheduled.trigger.channelId).toBe(UPCOMING_RELEASES_CHANNEL_ID);
+    expect(scheduled.content.title).toBe('Future Hit is out today');
+    expect(scheduled.trigger.channelId).toBe(RELEASE_DAY_CHANNEL_ID);
   });
 
   it('cancels the alert when interest is removed', async () => {
@@ -113,6 +138,13 @@ describe('upcoming reminder scheduling', () => {
   it('saves the mark without an alert for dateless titles', async () => {
     const result = await setUpcomingReminder(media({ releaseDate: undefined }), true);
     expect(result).toEqual({ status: 'saved' });
+  });
+
+  it('reports unavailable without an Expo Go reason in Jest', async () => {
+    expect(isExpoGoClient()).toBe(false);
+    MockNotifications.getPermissionsAsync.mockRejectedValueOnce(new Error('no module'));
+    const result = await setUpcomingReminder(media(), true);
+    expect(result).toEqual({ status: 'unavailable', reason: undefined });
   });
 });
 
@@ -167,8 +199,8 @@ describe('upcoming reminder refresh', () => {
   it('creates the releases channel', async () => {
     await ensureReleasesChannel();
     expect(MockNotifications.setNotificationChannelAsync).toHaveBeenCalledWith(
-      UPCOMING_RELEASES_CHANNEL_ID,
-      expect.objectContaining({ name: 'Upcoming releases' }),
+      RELEASE_DAY_CHANNEL_ID,
+      expect.objectContaining({ name: 'Release day' }),
     );
   });
 });
