@@ -1,5 +1,5 @@
 import { CatalogError } from '@/domain/errors/CatalogError';
-import type { CatalogFilter, CatalogMedia, CatalogSeason, CatalogSearchResult, MediaIdentity, MediaProvider, SeasonSummary, WatchProviderGroup } from '@/domain/models/media';
+import type { CatalogFilter, CatalogMedia, CatalogSeason, CatalogSearchResult, MediaEpisode, MediaIdentity, MediaProvider, SeasonSummary, WatchProviderGroup } from '@/domain/models/media';
 import type { CatalogRepository as CatalogRepositoryContract, PagedCatalog } from '@/domain/repositories/CatalogRepository';
 import { imageUrl } from '@/data/remote/catalog/config';
 import { deviceRegion } from '@/data/remote/catalog/region';
@@ -11,6 +11,7 @@ import { jikanClient } from '@/data/remote/jikan/client';
 import { kitsuClient } from '@/data/remote/kitsu/client';
 import { mapTmdbMovie, mapTmdbSeason, mapTmdbTv } from '@/data/remote/tmdb/mappers';
 import { tmdbClient } from '@/data/remote/tmdb/client';
+import type { TmdbSeasonDto } from '@/data/remote/tmdb/types';
 import { tvdbClient } from '@/data/remote/tvdb/client';
 import {
   TVDB_ANIME_GENRE_ID,
@@ -43,6 +44,61 @@ function toHitCandidate(dto: { id: number; title?: string; name?: string; poster
     voteAverage: dto.vote_average ?? null,
     voteCount: dto.vote_count ?? null,
   };
+}
+
+/**
+ * Picks the TMDB series matching an anime title. Exact normalized names win,
+ * year proximity breaks ties, and anything uncertain resolves to null so a
+ * wrong show (e.g. a live-action adaptation) never masquerades as the anime.
+ */
+export function pickTmdbSeriesMatch(
+  results: { id: number; name?: string | null; first_air_date?: string | null }[],
+  title: string,
+  year?: number,
+): number | null {
+  const wanted = normalizeTitle(title);
+  if (!wanted) return null;
+  const scored = results
+    .filter((item) => Number.isSafeInteger(item.id))
+    .map((item) => {
+      const name = typeof item.name === 'string' ? item.name : '';
+      const itemYear = typeof item.first_air_date === 'string' && /^\d{4}/.test(item.first_air_date)
+        ? Number(item.first_air_date.slice(0, 4))
+        : undefined;
+      return {
+        id: item.id,
+        exact: normalizeTitle(name) === wanted,
+        yearDelta: year !== undefined && itemYear !== undefined ? Math.abs(itemYear - year) : undefined,
+      };
+    });
+  const exactYear = scored.find((item) => item.exact && (item.yearDelta === undefined || item.yearDelta <= 1));
+  if (exactYear) return exactYear.id;
+  if (year !== undefined) {
+    const yearMatch = scored.filter((item) => item.yearDelta !== undefined && item.yearDelta <= 1).sort((a, b) => (a.yearDelta ?? 0) - (b.yearDelta ?? 0));
+    if (yearMatch.length) return yearMatch[0].id;
+  }
+  const exactAny = scored.find((item) => item.exact);
+  return exactAny ? exactAny.id : null;
+}
+
+/** TMDB season episodes re-keyed onto the anime identity (stable local keys). */
+function mapTmdbAnimeSeason(identity: MediaIdentity, seasonNumber: number, name: string, tmdbSeriesId: string, season: TmdbSeasonDto): CatalogSeason {
+  const episodes: MediaEpisode[] = (season.episodes ?? [])
+    .filter((episode) => Number.isSafeInteger(episode.episode_number) && episode.episode_number > 0)
+    .map((episode) => ({
+      provider: identity.provider,
+      mediaType: identity.mediaType,
+      providerId: `tmdb-${tmdbSeriesId}-s${seasonNumber}e${episode.episode_number}`,
+      seriesId: identity.providerId,
+      seasonNumber,
+      episodeNumber: episode.episode_number,
+      title: episode.name || `Episode ${episode.episode_number}`,
+      overview: episode.overview || undefined,
+      airDate: episode.air_date || undefined,
+      stillUrl: imageUrl(episode.still_path, 'still'),
+      runtimeMinutes: episode.runtime ?? undefined,
+    }));
+  return { series: identity, seasonNumber, name: name || `Season ${seasonNumber}`, episodes };
 }
 
 export function mergeCatalogResults(groups: readonly (readonly CatalogMedia[])[]): CatalogMedia[] {
@@ -158,6 +214,7 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
         media.seasonSummaries = summaries;
         if (total > 0) media.numberOfEpisodes = total;
       }
+      await this.applyTmdbAnimeShell(media, dto.idMal ?? undefined, signal);
       return media;
     }
     if (identity.mediaType === 'movie') return mapTmdbMovie(await tmdbClient.getMovie(identity.providerId, signal));
@@ -165,11 +222,45 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
   }
 
   /**
-   * TVDB detail: movies resolve from the movie record; series and anime share
-   * the series record (anime = series with the Anime genre), so seasons and
-   * episodes work exactly like shows. Per-season episode counts are computed
-   * from the episode list so progress math stays honest.
+   * Anime titles, posters, and seasons from TMDB when it carries the show.
+   * Anything uncertain (or any failure) leaves the AniList data untouched,
+   * so this overlay can only improve the detail screen, never break it.
    */
+  private async applyTmdbAnimeShell(media: CatalogMedia, malId: number | undefined, signal?: AbortSignal): Promise<void> {
+    try {
+      const search = await tmdbClient.searchTv(media.title, signal);
+      const tmdbId = pickTmdbSeriesMatch(search.results ?? [], media.title, media.year);
+      if (!tmdbId) return;
+      const tv = await tmdbClient.getTv(String(tmdbId), signal);
+      const shell = mapTmdbTv(tv);
+      media.title = shell.title;
+      media.posterUrl = shell.posterUrl ?? media.posterUrl;
+      media.backdropUrl = shell.backdropUrl ?? media.backdropUrl;
+      media.overview = shell.overview ?? media.overview;
+      if (shell.genres.length) media.genres = shell.genres;
+      if (shell.year !== undefined) media.year = shell.year;
+      if (shell.releaseDate) media.releaseDate = shell.releaseDate;
+      if (shell.rating !== undefined) media.rating = shell.rating;
+      if (shell.voteCount !== undefined) media.voteCount = shell.voteCount;
+      const tvSeasons = (tv.seasons ?? []).filter((season) => season.season_number > 0);
+      if (!tvSeasons.length) return;
+      const anilistId = media.providerId;
+      media.seasonSummaries = tvSeasons.map((season) => ({
+        seasonNumber: season.season_number,
+        name: season.name || `Season ${season.season_number}`,
+        episodeCount: season.episode_count,
+        airDate: season.air_date || undefined,
+        posterUrl: imageUrl(season.poster_path) ?? undefined,
+        refProviderId: anilistId,
+        refMalId: malId,
+        refTmdbSeriesId: String(tmdbId),
+      }));
+      const total = tvSeasons.reduce((sum, season) => sum + (season.episode_count ?? 0), 0);
+      if (total > 0) media.numberOfEpisodes = total;
+    } catch {
+      // AniList data stands on its own.
+    }
+  }
   private async getTvdbMedia(identity: MediaIdentity, signal?: AbortSignal): Promise<CatalogMedia> {
     numericId(identity);
     if (identity.mediaType === 'movie') return mapTvdbMovie(await tvdbClient.getMovie(identity.providerId, signal));
@@ -296,7 +387,7 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
       throw new CatalogError(identity.provider, 'metadata_unavailable');
     }
     const total = summary.episodeCount ?? 0;
-    const episodes = await this.getAnimeSeasonEpisodes(identity, seasonNumber, summary.name, summary.refProviderId, summary.refMalId, total, signal);
+    const episodes = await this.getAnimeSeasonEpisodes(identity, seasonNumber, summary.name, summary.refProviderId, summary.refMalId, total, signal, summary.refTmdbSeriesId);
     if (episodes) return episodes;
     return this.getAnimeSeason(identity, seasonNumber, signal);
   }
@@ -316,7 +407,19 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
     refMalId: number | undefined,
     total: number,
     signal?: AbortSignal,
+    refTmdbSeriesId?: string,
   ): Promise<CatalogSeason | undefined> {
+    // TMDB-backed anime seasons resolve episodes from TMDB first (correct
+    // titles, stills, counts); Kitsu/Jikan remain as fallbacks below.
+    if (refTmdbSeriesId) {
+      try {
+        const season = await tmdbClient.getSeason(refTmdbSeriesId, seasonNumber, signal);
+        const mapped = mapTmdbAnimeSeason(identity, seasonNumber, seasonName, refTmdbSeriesId, season);
+        if (mapped.episodes.length) return mapped;
+      } catch {
+        // Fall through to Kitsu, then Jikan, then the synthetic list below.
+      }
+    }
     const anilistId = Number(refProviderId ?? identity.providerId);
     if (Number.isSafeInteger(anilistId) && anilistId > 0) {
       try {
@@ -369,7 +472,7 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
         // The chain data stands on its own.
       }
     }
-    const episodes = await this.getAnimeSeasonEpisodes(identity, seasonNumber, summary.name, summary.refProviderId, malId, total, signal);
+    const episodes = await this.getAnimeSeasonEpisodes(identity, seasonNumber, summary.name, summary.refProviderId, malId, total, signal, summary.refTmdbSeriesId);
     if (episodes) return episodes;
     throw new CatalogError(identity.provider, 'metadata_unavailable');
   }
@@ -390,10 +493,13 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
   }
 
   async getRecentlyReleased(signal?: AbortSignal): Promise<CatalogMedia[]> {
-    const year = new Date().getFullYear();
+    // TMDB's own "now playing / on the air" lists: genuinely the latest
+    // released movies and currently airing series, newest first. Three pages
+    // per source so the full screen has room beyond the home rail's six.
+    const pages = [1, 2, 3];
     const settled = await Promise.allSettled([
-      tvdbClient.filterMovies({ page: 0, year }, signal).then((response) => (response.data ?? []).map(mapTvdbFilterMovie).filter((item): item is CatalogMedia => item !== null)),
-      tvdbClient.filterSeries({ page: 0, year }, signal).then((response) => (response.data ?? []).map((item) => mapTvdbFilterSeries(item)).filter((item): item is CatalogMedia => item !== null)),
+      ...pages.map((page) => tmdbClient.nowPlayingMovies(signal, page).then((response) => (response.results ?? []).map(mapTmdbMovie))),
+      ...pages.map((page) => tmdbClient.onTheAirTv(signal, page).then((response) => (response.results ?? []).map(mapTmdbTv))),
     ]);
     if (signal?.aborted) throw settled.find((result): result is PromiseRejectedResult => result.status === 'rejected')?.reason;
     const fulfilled = settled.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
@@ -402,7 +508,7 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
       if (reason instanceof Error) throw reason;
       throw new CatalogError('tvdb', 'network');
     }
-    return orderByRecency(fulfilled.flat());
+    return orderByRecency(fulfilled.flat(), 60);
   }
 
   /**
@@ -567,21 +673,24 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
 
   async getTrendingAllPage(page: number, signal?: AbortSignal): Promise<PagedCatalog> {
     const safePage = Math.max(1, Math.floor(page) || 1);
-    const [movies, series] = await Promise.all([
-      tvdbClient.filterMovies({ page: safePage - 1 }, signal),
-      tvdbClient.filterSeries({ page: safePage - 1 }, signal),
+    // TMDB's own trending lists plus AniList's trending anime, interleaved
+    // so the shelf mixes movies, shows, and anime. Anime joins page one
+    // only (AniList trending is a single ranked snapshot).
+    const [movies, series, anime] = await Promise.all([
+      tmdbClient.trendingMovies(signal, safePage),
+      tmdbClient.trendingTv(signal, safePage),
+      safePage === 1 ? anilistClient.trendingAnime(signal).catch(() => null) : Promise.resolve(null),
     ]);
-    const size = RemoteCatalogRepository.TVDB_PAGE_SIZE;
+    const size = 20;
+    const animeItems = (anime ?? []).slice(0, 10).map(mapAniListAnime);
     return {
       items: interleaveRanked([
-        (movies.data ?? []).slice(0, size).map(mapTvdbFilterMovie).filter((item): item is CatalogMedia => item !== null),
-        (series.data ?? []).slice(0, size).map((item) => mapTvdbFilterSeries(item)).filter((item): item is CatalogMedia => item !== null),
+        (movies.results ?? []).slice(0, size).map(mapTmdbMovie),
+        (series.results ?? []).slice(0, size).map(mapTmdbTv),
+        animeItems,
       ], size * 2),
       page: safePage,
-      totalPages: RemoteCatalogRepository.maxPages(Math.max(
-        RemoteCatalogRepository.tvdbTotalPages(movies.links?.total_items, movies.links?.page_size),
-        RemoteCatalogRepository.tvdbTotalPages(series.links?.total_items, series.links?.page_size),
-      )),
+      totalPages: RemoteCatalogRepository.maxPages(Math.max(movies.total_pages ?? 1, series.total_pages ?? 1)),
     };
   }
 
@@ -611,18 +720,20 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
 
   async getBollywoodPage(page: number, signal?: AbortSignal): Promise<PagedCatalog> {
     const safePage = Math.max(1, Math.floor(page) || 1);
+    // Hindi originals only: TVDB's language/country filters leak Hollywood
+    // and anime in, while TMDB's original-language filter is exact.
     const [movies, series] = await Promise.all([
-      tvdbClient.filterMovies({ page: safePage - 1, language: 'hin' }, signal),
-      tvdbClient.filterSeries({ page: safePage - 1, country: 'ind' }, signal).catch(() => null),
+      tmdbClient.discoverMovies(safePage, { language: 'hi' }, signal),
+      tmdbClient.discoverTv(safePage, { language: 'hi' }, signal),
     ]);
-    const size = RemoteCatalogRepository.TVDB_PAGE_SIZE;
+    const size = 20;
     return {
       items: interleaveRanked([
-        (movies.data ?? []).slice(0, size).map(mapTvdbFilterMovie).filter((item): item is CatalogMedia => item !== null),
-        (series?.data ?? []).slice(0, size).map((item) => mapTvdbFilterSeries(item)).filter((item): item is CatalogMedia => item !== null),
+        (movies.results ?? []).slice(0, size).map(mapTmdbMovie),
+        (series.results ?? []).slice(0, size).map(mapTmdbTv),
       ], size * 2),
       page: safePage,
-      totalPages: RemoteCatalogRepository.maxPages(RemoteCatalogRepository.tvdbTotalPages(movies.links?.total_items, movies.links?.page_size)),
+      totalPages: RemoteCatalogRepository.maxPages(Math.max(movies.total_pages ?? 1, series.total_pages ?? 1)),
     };
   }
 

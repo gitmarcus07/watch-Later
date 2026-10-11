@@ -88,13 +88,13 @@ export const tmdbClient = {
     if (!response || !Array.isArray(response.results)) throw new CatalogError('tmdb', 'invalid_response');
     return response;
   },
-  async nowPlayingMovies(signal?: AbortSignal) {
-    const response = await requestJson<TmdbListDto<TmdbMovieDto>>('tmdb', buildTmdbUrl('movie/now_playing'), {}, signal);
+  async nowPlayingMovies(signal?: AbortSignal, page = 1) {
+    const response = await requestJson<TmdbListDto<TmdbMovieDto>>('tmdb', buildTmdbUrl('movie/now_playing', { page: Math.max(1, page) }), {}, signal);
     if (!response || !Array.isArray(response.results)) throw new CatalogError('tmdb', 'invalid_response');
     return response;
   },
-  async onTheAirTv(signal?: AbortSignal) {
-    const response = await requestJson<TmdbListDto<TmdbTvDto>>('tmdb', buildTmdbUrl('tv/on_the_air'), {}, signal);
+  async onTheAirTv(signal?: AbortSignal, page = 1) {
+    const response = await requestJson<TmdbListDto<TmdbTvDto>>('tmdb', buildTmdbUrl('tv/on_the_air', { page: Math.max(1, page) }), {}, signal);
     if (!response || !Array.isArray(response.results)) throw new CatalogError('tmdb', 'invalid_response');
     return response;
   },

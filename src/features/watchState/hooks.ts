@@ -1,4 +1,4 @@
-import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
+import { useMutation, useQuery, useQueryClient, type QueryClient } from '@tanstack/react-query';
 import type { CatalogMedia, CatalogSeason, MediaIdentity } from '@/domain/models/media';
 import type { InterestedCount, WatchPriority } from '@/domain/models/watchState';
 import { catalogRepository } from '@/data/remote/catalog/RemoteCatalogRepository';
@@ -143,11 +143,50 @@ export function useSaveToWatchlist(media: CatalogMedia) {
   });
 }
 
+export interface MovieWatchedOptimism {
+  key: readonly unknown[];
+  apply: () => Promise<{ previous: boolean | undefined }>;
+  rollback: (context?: { previous: boolean | undefined }) => void;
+  settle: () => void;
+}
+
+/**
+ * Instant watched-button flip for movies: applies the new value to the
+ * status query before the SQLite write, rolls back on failure, and refetches
+ * after settling. Extracted pure (no React) so the flip/rollback/settle
+ * sequence is unit-testable without a renderer.
+ */
+export function movieWatchedOptimism(queryClient: QueryClient, media: CatalogMedia, next: boolean): MovieWatchedOptimism {
+  const key = [...watchKeys.media({ provider: media.provider, mediaType: media.mediaType, providerId: media.providerId }), 'movie-watched'] as const;
+  return {
+    key,
+    apply: async () => {
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData<boolean>(key);
+      queryClient.setQueryData<boolean>(key, next);
+      return { previous };
+    },
+    rollback: (context) => {
+      if (context?.previous !== undefined) queryClient.setQueryData(key, context.previous);
+    },
+    settle: () => {
+      void queryClient.invalidateQueries({ queryKey: key });
+    },
+  };
+}
+
 export function useMovieWatchedMutation(media: CatalogMedia, currentlyWatched: boolean) {
+  const queryClient = useQueryClient();
   const invalidate = useInvalidateWatchState();
+  const next = !currentlyWatched;
   return useMutation({
-    mutationFn: () => watchStateRepository.markMovieWatched(media, !currentlyWatched),
+    // Flip the button instantly; the SQLite write lands right after.
+    // Rolls back on failure.
+    onMutate: () => movieWatchedOptimism(queryClient, media, next).apply(),
+    onError: (_error, _variables, context) => movieWatchedOptimism(queryClient, media, next).rollback(context),
+    mutationFn: () => watchStateRepository.markMovieWatched(media, next),
     onSuccess: () => { invalidate(true); if (!currentlyWatched) maybePromptRating(media); },
+    onSettled: () => movieWatchedOptimism(queryClient, media, next).settle(),
   });
 }
 

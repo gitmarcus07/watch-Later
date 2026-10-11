@@ -146,13 +146,22 @@ describe('discovery repository', () => {
   });
 
   it('orders recent releases newest first and caps home sections', async () => {
-    jest.spyOn(tvdbClient, 'filterMovies').mockResolvedValue({ data: [tvdbMovie(5, 'New Film', '2026', 400)], links: tvdbLinks(200) } as never);
-    jest.spyOn(tvdbClient, 'filterSeries').mockResolvedValue({
-      data: [tvdbSeries(7, 'New Show', '2026-08-15', '2026', 500), tvdbSeries(6, 'Old Show', '2020-01-01', '2020', 300)],
-      links: tvdbLinks(200),
-    } as never);
+    jest.spyOn(tmdbClient, 'nowPlayingMovies').mockResolvedValue({ results: [movieDto(5, 'New Film', '2026-09-18')] });
+    jest.spyOn(tmdbClient, 'onTheAirTv').mockResolvedValue({
+      results: [tvDto(7, 'New Show', '2026-08-15'), tvDto(6, 'Old Show', '2020-01-01')],
+    });
     const recent = await new RemoteCatalogRepository().getRecentlyReleased();
-    expect(recent.map((item) => item.id)).toEqual(['tvdb:series:7', 'tvdb:movie:5', 'tvdb:series:6']);
+    expect(recent.map((item) => item.id)).toEqual(['tmdb:movie:5', 'tmdb:series:7', 'tmdb:series:6']);
+  });
+
+  it('walks several now-playing pages so the full screen fills past fifteen', async () => {
+    const movies = jest.spyOn(tmdbClient, 'nowPlayingMovies').mockImplementation(async (_signal, page = 1) => ({
+      results: page <= 2 ? [movieDto(100 + page, `Film P${page}`, `2026-09-0${page}`)] : [],
+    }));
+    jest.spyOn(tmdbClient, 'onTheAirTv').mockResolvedValue({ results: [] });
+    const recent = await new RemoteCatalogRepository().getRecentlyReleased();
+    expect(movies).toHaveBeenCalledTimes(3);
+    expect(recent.map((item) => item.id)).toEqual(['tmdb:movie:102', 'tmdb:movie:101']);
   });
 
   it('returns future-dated upcoming titles ordered oldest first', async () => {
@@ -182,20 +191,31 @@ describe('discovery repository', () => {
   });
 
   it('pages trending-all and bollywood feeds with capped totals', async () => {
-    jest.spyOn(tvdbClient, 'filterMovies').mockResolvedValue({
-      data: [tvdbMovie(30, 'Trend Film', '2026', 950), tvdbMovie(31, 'Hindi Film', '2026', 400)], links: tvdbLinks(10500),
-    } as never);
-    jest.spyOn(tvdbClient, 'filterSeries').mockResolvedValue({
-      data: [tvdbSeries(32, 'Hindi Show', '2026-03-01', '2026', 350)], links: tvdbLinks(10500),
-    } as never);
+    jest.spyOn(tmdbClient, 'trendingMovies').mockResolvedValue({
+      results: [movieDto(30, 'Trend Film', '2026-01-01'), movieDto(31, 'Second Film', '2026-02-01')], total_pages: 500,
+    });
+    jest.spyOn(tmdbClient, 'trendingTv').mockResolvedValue({
+      results: [tvDto(32, 'Trend Show', '2026-03-01')], total_pages: 500,
+    });
+    const animeSpy = jest.spyOn(anilistClient, 'trendingAnime').mockResolvedValue([animeDto(33, 'Trend Anime')]);
     const trending = await new RemoteCatalogRepository().getTrendingAllPage(1);
     expect(trending.page).toBe(1);
     expect(trending.totalPages).toBe(20);
-    expect(trending.items.map((item) => item.id)).toEqual(['tvdb:movie:30', 'tvdb:series:32', 'tvdb:movie:31']);
+    // Movies, shows, and anime interleaved — every section's own content.
+    expect(trending.items.map((item) => item.id)).toEqual(['tmdb:movie:30', 'tmdb:series:32', 'anilist:anime:33', 'tmdb:movie:31']);
+    expect(animeSpy).toHaveBeenCalledTimes(1);
 
+    const discoverMovies = jest.spyOn(tmdbClient, 'discoverMovies').mockResolvedValue({
+      results: [movieDto(40, 'Hindi Film', '2026-01-01')], total_pages: 12,
+    });
+    jest.spyOn(tmdbClient, 'discoverTv').mockResolvedValue({
+      results: [tvDto(41, 'Hindi Show', '2026-03-01')], total_pages: 8,
+    });
     const bollywood = await new RemoteCatalogRepository().getBollywoodPage(1);
-    expect(bollywood.items.map((item) => item.id).sort()).toEqual(['tvdb:movie:30', 'tvdb:movie:31', 'tvdb:series:32'].sort());
-    expect(bollywood.totalPages).toBe(20);
+    // Hindi originals only — Hollywood and anime cannot leak in.
+    expect(discoverMovies).toHaveBeenCalledWith(1, { language: 'hi' }, undefined);
+    expect(bollywood.items.map((item) => item.id).sort()).toEqual(['tmdb:movie:40', 'tmdb:series:41'].sort());
+    expect(bollywood.totalPages).toBe(12);
   });
 
   it('resolves directors and age ratings from TMDb with regional fallback', async () => {

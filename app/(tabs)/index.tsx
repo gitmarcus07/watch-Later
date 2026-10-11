@@ -13,7 +13,8 @@ import { PosterCard } from '@/components/media/PosterCard';
 import { SectionHeader } from '@/components/common/SectionHeader';
 import { mediaRouteId } from '@/features/catalog/mediaIdentity';
 import { useContinueWatching, useWatchedLibrary, useWatchlist, watchKeys } from '@/features/watchState/hooks';
-import { useRecentlyReleased, useTopRated } from '@/features/catalog/hooks';
+import { useImdbTop, useRecentlyReleased } from '@/features/catalog/hooks';
+import { mixImdbTops } from '@/data/remote/supabase/imdbRatings';
 import { triggerLightHaptic } from '@/lib/haptics';
 import { maybePromptNotificationPermission } from '@/features/notifications/permissionGate';
 import type { CatalogMedia } from '@/domain/models/media';
@@ -32,7 +33,12 @@ export default function HomeScreen() {
   const watchlistQuery = useWatchlist();
   const watchedQuery = useWatchedLibrary();
   const recentQuery = useRecentlyReleased();
-  const topQuery = useTopRated();
+  const topMoviesQuery = useImdbTop('movie');
+  const topSeriesQuery = useImdbTop('series');
+  const topItems = mixImdbTops(topMoviesQuery.data ?? [], topSeriesQuery.data ?? []).slice(0, 6);
+  const topLoading = topMoviesQuery.isLoading || topSeriesQuery.isLoading;
+  const topFailed = (topMoviesQuery.isError || topSeriesQuery.isError) && !topItems.length;
+  const refetchTop = () => { void Promise.all([topMoviesQuery.refetch(), topSeriesQuery.refetch()]); };
 
   const watchlistCount = watchlistQuery.data?.length ?? 0;
   const watchedCount = (watchedQuery.data ?? []).length;
@@ -103,13 +109,13 @@ export default function HomeScreen() {
     <FadeInView delay={220}>
     <View style={styles.section}>
       <View style={styles.rowHeader}>
-        <SectionHeader title="Top 100" subtitle="The most-loved of all time" />
+        <SectionHeader title="Top 100" subtitle="IMDb's highest-rated of all time" />
         <Pressable accessibilityRole="button" accessibilityLabel="See all top 100" onPress={() => router.push('/top-100')} style={styles.seeAll}><AppText variant="label" style={styles.seeAllText}>See all</AppText><Ionicons name="chevron-forward" size={15} color={colors.accent} /></Pressable>
       </View>
-      {topQuery.isLoading ? <View style={styles.skeletonRow}>{[0, 1, 2, 3].map((index) => <PosterSkeleton key={index} />)}</View>
-        : topQuery.isError ? <ErrorView message="Couldn't load the top 100." onRetry={() => void topQuery.refetch()} />
-        : (topQuery.data ?? []).length ? <FlatList horizontal data={(topQuery.data ?? []).slice(0, 6)} keyExtractor={(item) => item.id} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.carousel} renderItem={({ item, index }) =>
-          <PosterCard title={item.title} subtitle={subtitleFor(item)} posterUri={item.posterUrl} badge={`#${index + 1}`} onPress={() => openMedia(mediaRouteId(item))} />
+      {topLoading ? <View style={styles.skeletonRow}>{[0, 1, 2, 3].map((index) => <PosterSkeleton key={index} />)}</View>
+        : topFailed ? <ErrorView message="Couldn't load the top 100." onRetry={refetchTop} />
+        : topItems.length ? <FlatList horizontal data={topItems} keyExtractor={(item) => `${item.mediaType}:${item.tmdbId}`} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.carousel} renderItem={({ item, index }) =>
+          <PosterCard title={item.title} subtitle={`IMDb ★ ${item.rating.toFixed(1)}${item.year ? ` · ${item.year}` : ''}`} posterUri={item.posterUrl} badge={`#${index + 1}`} onPress={() => openMedia(`tmdb:${item.mediaType}:${item.tmdbId}`)} />
         } />
         : null}
     </View>

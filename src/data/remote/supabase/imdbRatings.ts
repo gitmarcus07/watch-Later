@@ -78,8 +78,7 @@ export function mapImdbRating(row: Pick<ImdbRatingRow, 'rating' | 'votes'>): Imd
 }
 
 /** Batch IMDb scores for displayed titles, keyed `mediaType:tmdbId`. Never throws. */
-export async function fetchImdbRatingsFor(items: { tmdbId: number; mediaType: 'movie' | 'series' }[]): Promise<Map<string, ImdbRating>> {
-  const result = new Map<string, ImdbRating>();
+export async function fetchImdbRatingsFor(items: { tmdbId: number; mediaType: 'movie' | 'series' }[]): Promise<Map<string, ImdbRating>> {  const result = new Map<string, ImdbRating>();
   const client = supabase;
   if (!client || !items.length) return result;
   try {
@@ -110,4 +109,15 @@ export async function fetchImdbRatingsFor(items: { tmdbId: number; mediaType: 'm
     // Ratings are decoration: the list renders without them.
   }
   return result;
+}
+
+/**
+ * One mixed Top 100 from both IMDb lists: rating first, vote count breaks
+ * ties, caller's limit caps the result. Movies and series compete on equal
+ * terms — rank is positional, not the per-list list_rank.
+ */
+export function mixImdbTops(movies: ImdbTopItem[], series: ImdbTopItem[], limit = 100): ImdbTopItem[] {
+  return [...movies, ...series]
+    .sort((a, b) => b.rating - a.rating || b.votes - a.votes)
+    .slice(0, Math.max(0, limit));
 }

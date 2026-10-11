@@ -66,7 +66,6 @@ export default function UpcomingScreen() {
       const selected = option.value === filter;
       return <Pressable key={option.value} accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={`Show upcoming ${option.label}`} onPress={() => { if (!selected) triggerLightHaptic(); setFilter(option.value); }} style={[styles.filter, selected && styles.filterActive]}><AppText variant="label" style={selected ? styles.filterTextActive : styles.filterText}>{option.label}</AppText></Pressable>;
     })}</View>
-    <Pressable accessibilityRole="button" accessibilityLabel="Open Upcoming on OTT for India" accessibilityHint="Coming soon" onPress={() => router.push('/ott-upcoming' as never)} style={({ pressed }) => [styles.ottBanner, pressed && styles.pressed]}><AppText variant="bodyMedium" style={styles.ottBannerText}>Upcoming on OTT · India</AppText><AppText variant="caption" style={styles.ottBannerSub}>Coming soon</AppText></Pressable>
     {loading ? <FlatList data={[0, 1, 2, 3, 4, 5]} keyExtractor={(item) => String(item)} numColumns={2} columnWrapperStyle={styles.gridRow} contentContainerStyle={styles.grid} style={styles.flat} renderItem={() => <PosterSkeleton />} showsVerticalScrollIndicator={false} />
       : failed ? <ErrorView message={firstError instanceof CatalogError ? firstError.userMessage : 'Could not load upcoming titles. Check your connection and try again.'} onRetry={() => { for (const query of queries) void query.refetch(); }} />
       : items.length ? <FlatList
@@ -98,10 +97,6 @@ const styles = StyleSheet.create({
   filterActive: { backgroundColor: colors.accent, borderColor: colors.accent },
   filterText: { color: colors.textSecondary },
   filterTextActive: { color: colors.white },
-  ottBanner: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between', backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radius.medium, paddingHorizontal: spacing.lg, paddingVertical: spacing.md, marginBottom: spacing.md },
-  ottBannerText: { color: colors.accent },
-  ottBannerSub: { color: colors.textMuted },
-  pressed: { opacity: 0.85 },
   flat: { flex: 1 },
   grid: { paddingBottom: spacing['2xl'], gap: spacing.md },
   gridRow: { gap: spacing.md },

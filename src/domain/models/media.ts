@@ -34,6 +34,12 @@ export interface SeasonSummary {
    */
   refProviderId?: string;
   refMalId?: number;
+  /**
+   * Anime-only: TMDB series backing this season when the title resolved to
+   * TMDB (titles/posters/seasons from TMDB). Episode fetching tries TMDB
+   * first via this id, then falls back to the AniList refs above.
+   */
+  refTmdbSeriesId?: string;
 }
 
 export interface CatalogMedia extends MediaIdentity {

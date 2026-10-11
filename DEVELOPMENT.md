@@ -67,3 +67,4 @@ Weekly snapshot in public.imdb_ratings (migration 202610110004: public SELECT, s
 
 Repo secrets required (GitHub Settings -> Secrets -> Actions, manual one-time step): SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, TMDB_API_KEY. The app reads the table with the anon key and never sees these values. First run: Actions tab -> imdb-ratings -> Run workflow, then check More -> IMDb Top 250 in the app.
 
+ The same run also snapshots recent releases (current + previous year, 1000+ votes, unranked rows) so detail screens and Global Hits cards can show IMDb scores for fresh titles.

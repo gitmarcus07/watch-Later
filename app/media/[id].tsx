@@ -13,7 +13,6 @@ import { FadeInView } from '@/components/common/FadeInView';
 import { friendlyErrorMessage } from '@/lib/friendlyError';
 import { triggerLightHaptic, triggerMediumHaptic, triggerSuccessHaptic } from '@/lib/haptics';
 import { SeasonsSection } from '@/components/media/SeasonsSection';
-import { OttReleaseSection } from '@/components/media/OttReleaseSection';
 import { Screen } from '@/components/common/Screen';
 import { DetailSkeleton, ErrorView } from '@/components/feedback/FeedbackViews';
 import { showDialog, showToast } from '@/components/feedback/AppDialog';
@@ -24,8 +23,8 @@ import { mediaId, parseMediaRouteId } from '@/features/catalog/mediaIdentity';
 import { isUpcoming, formatReleaseDate } from '@/features/catalog/upcoming';
 import { finishTitle } from '@/features/watchState/status';
 import { PRIORITY_META } from '@/features/watchState/priority';
-import type { WatchPriority } from '@/domain/models/watchState';
-import { useFavoriteMutation, useFavoriteStatus, useMovieWatchedStatus, useSaveToWatchlist, useSeriesProgress, useSeriesTrackingStatus, useTrackedMedia, useWatchlist, useWatchlistStatus, useWatchlistMutation, useMovieWatchedMutation, useSeriesTrackingMutation } from '@/features/watchState/hooks';
+import type { SeriesProgress, WatchPriority } from '@/domain/models/watchState';
+import { useFavoriteMutation, useFavoriteStatus, useMovieWatchedStatus, useSaveToWatchlist, useSeriesProgress, useSeriesTrackingStatus, useTrackedMedia, useWatchlist, useWatchlistStatus, useWatchlistMutation, useMovieWatchedMutation, useSeriesTrackingMutation, watchKeys } from '@/features/watchState/hooks';
 import { watchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
 import { scheduleAutoSync } from '@/features/sync/autoSync';
 import { queryClient } from '@/lib/query/queryClient';
@@ -68,13 +67,33 @@ export default function MediaDetailScreen() {
     if (!media || media.mediaType === 'movie' || statusBusy) return;
     triggerMediumHaptic();
     setStatusBusy(true);
+    // Flip to watched instantly; the season-by-season network fetch + write
+    // below can take seconds. Rolls back on failure.
+    await queryClient.cancelQueries({ queryKey: watchKeys.progress });
+    const previous = queryClient.getQueryData<SeriesProgress[]>(watchKeys.progress);
+    queryClient.setQueryData<SeriesProgress[]>(watchKeys.progress, (old) => {
+      const list = old ?? [];
+      const id = identity ? mediaId(identity) : undefined;
+      if (list.some((item) => item.media.id === id)) {
+        return list.map((item) => item.media.id === id ? { ...item, isComplete: true, progress: 1 } : item);
+      }
+      const total = media.numberOfEpisodes ?? media.seasonSummaries?.reduce((sum, summary) => sum + (summary.episodeCount ?? 0), 0) ?? 0;
+      return [...list, {
+        identity: identity ?? { provider: media.provider, mediaType: media.mediaType, providerId: media.providerId },
+        media: actionMedia, watchedEpisodeCount: total, cachedEpisodeCount: total,
+        totalEpisodeCount: total > 0 ? total : undefined, progress: 1, isComplete: true,
+      }];
+    });
     try {
       await finishTitle(actionMedia);
       triggerSuccessHaptic();
       void queryClient.invalidateQueries({ queryKey: ['watch'] });
       scheduleAutoSync('mutation');
       showToast('Marked whole show as watched', 'success');
-    } catch (error) { void showDialog({ type: 'error', title: 'Couldn’t mark as finished', message: friendlyErrorMessage(error) }); }
+    } catch (error) {
+      queryClient.setQueryData(watchKeys.progress, previous);
+      void showDialog({ type: 'error', title: 'Couldn’t mark as finished', message: friendlyErrorMessage(error) });
+    }
     finally { setStatusBusy(false); }
   }
 
@@ -87,12 +106,23 @@ export default function MediaDetailScreen() {
     });
     if (!confirmed) return;
     setStatusBusy(true);
+    await queryClient.cancelQueries({ queryKey: watchKeys.progress });
+    const previousProgress = queryClient.getQueryData<SeriesProgress[]>(watchKeys.progress);
+    queryClient.setQueryData<SeriesProgress[]>(watchKeys.progress, (old) => {
+      const list = old ?? [];
+      const id = identity ? mediaId(identity) : undefined;
+      if (!list.some((item) => item.media.id === id)) return list;
+      return list.map((item) => item.media.id === id ? { ...item, isComplete: false, watchedEpisodeCount: 0, progress: 0, nextEpisode: undefined } : item);
+    });
     try {
       if (media.episodeMetadata === 'available') await watchStateRepository.setSeriesWatched(media, [], false);
       else await watchStateRepository.setSeriesComplete(media, false);
       void queryClient.invalidateQueries({ queryKey: ['watch'] });
       scheduleAutoSync('mutation');
-    } catch (error) { void showDialog({ type: 'error', title: 'Couldn’t clear progress', message: friendlyErrorMessage(error) }); }
+    } catch (error) {
+      queryClient.setQueryData(watchKeys.progress, previousProgress);
+      void showDialog({ type: 'error', title: 'Couldn’t clear progress', message: friendlyErrorMessage(error) });
+    }
     finally { setStatusBusy(false); }
   }
 
@@ -279,7 +309,6 @@ export default function MediaDetailScreen() {
         </View>
       )} /></View> : null}
       {providerGroups.length ? <View style={styles.section}><AppText variant="heading3" style={styles.seasonHeading}>Where to watch</AppText>{providerGroups.map((group) => <View key={group.category} style={styles.providerGroup}><AppText variant="caption" muted style={styles.providerCategory}>{group.category === 'stream' ? 'Stream' : group.category === 'rent' ? 'Rent' : 'Buy'}</AppText><View style={styles.providerRow}>{group.providers.map((provider) => <View key={provider.id} style={styles.provider} accessibilityRole="image" accessibilityLabel={provider.name}>{provider.logoUrl ? <Image source={{ uri: provider.logoUrl }} style={styles.providerLogo} resizeMode="cover" /> : <AppText variant="caption">{provider.name.slice(0, 2).toUpperCase()}</AppText>}</View>)}</View></View>)}</View> : null}
-      <OttReleaseSection media={media} />
       {episodic ? <View style={styles.section}><AppText variant="heading3" style={styles.seasonHeading}>Seasons & episodes</AppText>
         {progress?.nextEpisode ? <View style={styles.messageCard}><Ionicons name="play-circle-outline" size={19} color={colors.accent} /><AppText variant="bodySmall" muted style={styles.messageText}>Up next: S{progress.nextEpisode.seasonNumber} E{progress.nextEpisode.episodeNumber} · {progress.nextEpisode.title}</AppText></View> : null}
         <SeasonsSection media={media} progress={progress} initialSeasonNumber={routeSeason} />

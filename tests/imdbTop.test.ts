@@ -1,5 +1,5 @@
 import { formatCompactCount } from '@/lib/format';
-import { mapImdbRating, mapImdbRow } from '@/data/remote/supabase/imdbRatings';
+import { mapImdbRating, mapImdbRow, mixImdbTops, type ImdbTopItem } from '@/data/remote/supabase/imdbRatings';
 
 describe('IMDb display helpers', () => {
   it('compacts vote counts', () => {
@@ -59,5 +59,23 @@ describe('IMDb snapshot row mapping', () => {
     expect(mapImdbRating({ rating: 7.3, votes: 851 })).toEqual({ rating: 7.3, votes: 851 });
     expect(mapImdbRating({ rating: Number.NaN, votes: 851 })).toBeNull();
     expect(mapImdbRating({ rating: 7.3, votes: Number.POSITIVE_INFINITY })).toBeNull();
+  });
+
+  it('mixes movies and series into one rating-ordered top 100', () => {
+    const movie = (rank: number, rating: number, votes: number): ImdbTopItem => ({
+      rank, tmdbId: rank, mediaType: 'movie', imdbId: `tt-m${rank}`, title: `Film ${rank}`,
+      rating, votes,
+    });
+    const show = (rank: number, rating: number, votes: number): ImdbTopItem => ({
+      rank, tmdbId: 1000 + rank, mediaType: 'series', imdbId: `tt-s${rank}`, title: `Show ${rank}`,
+      rating, votes,
+    });
+    const mixed = mixImdbTops(
+      [movie(1, 9.3, 100), movie(2, 8.0, 500)],
+      [show(1, 9.5, 50), show(2, 8.0, 900)],
+    );
+    expect(mixed.map((item) => item.title)).toEqual(['Show 1', 'Film 1', 'Show 2', 'Film 2']);
+    expect(mixImdbTops([movie(1, 9.0, 1)], [show(1, 9.0, 2)], 1).map((item) => item.title)).toEqual(['Show 1']);
+    expect(mixImdbTops([], [])).toEqual([]);
   });
 });

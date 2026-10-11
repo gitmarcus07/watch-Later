@@ -69,7 +69,7 @@ export default function BrowseScreen() {
   };
 
   return <Screen>
-    <FadeInView><View style={styles.header}><IconButton name="arrow-back" label="Go back" onPress={() => router.back()} /><View style={styles.title}><AppText variant="heading1">Browse</AppText><AppText variant="bodySmall" muted>Fresh from the catalog — tap anything to view it</AppText></View><IconButton name="calendar-outline" label="Open upcoming releases" onPress={() => router.push('/upcoming' as never)} /></View></FadeInView>
+    <FadeInView><View style={styles.header}><IconButton name="arrow-back" label="Go back" onPress={() => router.back()} /><View style={styles.title}><AppText variant="heading1">Browse</AppText></View><IconButton name="calendar-outline" label="Open upcoming releases" onPress={() => router.push('/upcoming' as never)} /></View></FadeInView>
     <View style={styles.tabs}>{TABS.map((option) => (
       <Pressable key={option.value} accessibilityRole="tab" accessibilityLabel={option.hint} accessibilityState={{ selected: tab === option.value }} onPress={() => { if (tab !== option.value) triggerLightHaptic(); setTab(option.value); }} style={[styles.tab, tab === option.value && styles.active]}>
         <AppText variant="label" style={{ color: tab === option.value ? colors.white : colors.textSecondary }}>{option.label}</AppText>
