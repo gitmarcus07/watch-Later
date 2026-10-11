@@ -5,15 +5,20 @@ export interface Database {
   public: {
     Tables: {
       library_media: Table<CloudMediaRow>;
-      watchlist_entries: Table<CloudStateRow & { added_at: string }>;
-      movie_watches: Table<CloudStateRow & { watched_at: string | null }>;
-      tracked_series: Table<CloudStateRow & { tracking_started_at: string }>;
+      watchlist_entries: Table<CloudStateRow & { added_at: string; position?: number | null; priority?: string | null }>;
+      movie_watches: Table<CloudStateRow & { watched_at: string | null; rewatch_count?: number | null }>;
+      tracked_series: Table<CloudStateRow & { tracking_started_at: string; completed?: boolean | null; completed_at?: string | null }>;
       episode_watches: Table<CloudEpisodeRow>;
       favorite_entries: Table<CloudStateRow & { favorited_at: string }>;
+      user_ratings: Table<CloudStateRow & { rating: number | null; thumbs: number }>;
+      interested_marks: Table<CloudStateRow & { title: string; poster_url: string | null; release_date: string | null; marked_at: string }>;
+      ott_releases: Table<CloudOttReleaseRow>;
       profiles: Table<{ id: string; created_at: string; updated_at: string }>;
+      global_hit_reports: Table<CloudHitReportRow>;
+      imdb_ratings: Table<CloudImdbRatingRow>;
     };
     Views: Record<string, never>;
-    Functions: Record<string, never>;
+    Functions: { get_interested_counts: { Args: Record<string, never>; Returns: { provider: string; media_type: string; provider_id: string; interested_count: number }[] } };
     Enums: Record<string, never>;
     CompositeTypes: Record<string, never>;
   };
@@ -23,8 +28,16 @@ export type Json = string | number | boolean | null | { [key: string]: Json | un
 
 type Table<Row> = { Row: Row; Insert: Row; Update: Partial<Row>; Relationships: [] };
 type CloudMediaRow = { user_id: string; provider: string; media_type: string; provider_id: string; title: string; original_title: string | null; overview: string | null; poster_url: string | null; backdrop_url: string | null; release_date: string | null; year: number | null; genres: Json; number_of_seasons: number | null; number_of_episodes: number | null; season_summaries: Json; episode_metadata: string; updated_at: string };
-type CloudStateRow = { user_id: string; provider: string; media_type: string; provider_id: string; is_deleted: boolean; updated_at: string };
-type CloudEpisodeRow = { user_id: string; provider: string; episode_provider_id: string; series_provider: string; series_media_type: string; series_provider_id: string; season_number: number; episode_number: number; title: string; overview: string | null; air_date: string | null; still_url: string | null; runtime_minutes: number | null; watched_at: string | null; is_deleted: boolean; updated_at: string };
+type CloudHitReportRow = { period_type: string; period_key: string; generated_at: string; retrieved_at: string; methodology: string; status: string; movie_items: Json; series_items: Json };
+type CloudImdbRatingRow = { tmdb_id: number; media_type: string; imdb_id: string; title: string; year: number | null; poster_url: string | null; rating: number; votes: number; list_rank: number; updated_at: string };type CloudStateRow = { user_id: string; provider: string; media_type: string; provider_id: string; is_deleted: boolean; updated_at: string };
+type CloudEpisodeRow = { user_id: string; provider: string; episode_provider_id: string; series_provider: string; series_media_type: string; series_provider_id: string; season_number: number; episode_number: number; title: string; overview: string | null; air_date: string | null; still_url: string | null; runtime_minutes: number | null; watched_at: string | null; is_deleted: boolean; updated_at: string; rewatch_count?: number | null };
+export type CloudOttReleaseRow = {
+  id: string; provider: string; media_type: string; provider_id: string; movie_title: string;
+  platform: string; platform_logo_url: string | null; tmdb_provider_id: number | null; country: string;
+  theatrical_date: string | null; ott_date: string | null; date_precision: string; status: string;
+  source_url: string | null; source_published_at: string | null; last_verified_at: string;
+  created_at: string; updated_at: string; notes: string | null; is_premiere: boolean;
+};
 
 const url = process.env.EXPO_PUBLIC_SUPABASE_URL;
 const anonKey = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
@@ -37,6 +50,11 @@ export const supabase =
           autoRefreshToken: true,
           persistSession: true,
           detectSessionInUrl: false,
+          // Native Google sign-in must use PKCE: the authorize URL carries a
+          // code_challenge and the callback returns `?code=…`, which
+          // SupabaseAuthService exchanges via exchangeCodeForSession. The
+          // verifier is kept in the same AsyncStorage by the client.
+          flowType: 'pkce',
         },
       })
     : null;

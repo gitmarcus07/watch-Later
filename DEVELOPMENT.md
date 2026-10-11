@@ -41,4 +41,29 @@ To reset a disposable development emulator safely, wait until More shows Synced,
 
 Watchlist, watched, and episode state remain fully usable offline behind a subtle offline banner; the `AppErrorBoundary` in `app/_layout.tsx` catches unexpected rendering failures with a recovery screen that never deletes local data. Catalog metadata is cached with stale-while-refresh TanStack Query settings (`src/features/catalog/hooks.ts`); user watch state is never cached outside SQLite. Wide screens constrain content to a readable max width (`src/theme/responsive.ts`).
 
-Home discovery (Trending Now, Recently Released) reads live TMDb list endpoints (`trending/movie|tv/week`, `movie/now_playing`, `tv/on_the_air`) plus AniList trending anime through `RemoteCatalogRepository.getTrending/getRecentlyReleased`; results cache in TanStack Query and refresh automatically as providers update. Favorites sync like other watch state via the `favorite` outbox entity and Supabase `favorite_entries` (`supabase/migrations/202610060003_favorites.sql`, applied with `supabase db push`). Custom lists and viewing history are local-only in this phase: lists persist in SQLite (`custom_lists`, `custom_list_items`, migration v7) without cloud sync, and history derives from actual movie/episode watch timestamps.
+Home discovery (Trending Now, Recently Released) reads live TMDb list endpoints (`trending/movie|tv/week`, `movie/now_playing`, `tv/on_the_air`) plus AniList trending anime through `RemoteCatalogRepository.getTrending/getRecentlyReleased`; results cache in TanStack Query and refresh automatically as providers update. Favorites sync like other watch state via the `favorite` outbox entity and Supabase `favorite_entries` (`supabase/migrations/202610060003_favorites.sql`, applied with `supabase db push`). Custom lists and viewing history are local-only in this phase: lists persist in SQLite (`custom_lists`, `custom_list_items`, migration v7) without cloud sync, and history derives from actual movie/episode watch timestamps. User ratings and rewatch counts sync like other watch state (`user_ratings` table, `rating` outbox entity, migration v8; Supabase `202610060004_ratings_rewatch.sql`).
+
+## Google sign-in and delete-account backend
+
+Google OAuth (Supabase dashboard, one time): Authentication -> Providers -> Google -> enable with your OAuth client ID/secret, then URL Configuration -> Redirect URLs -> add the dev redirect (Expo Go prints it; typically your LAN exp:// URL plus uth/callback) and watchlater://auth/callback for builds. No app code changes needed after that. Redirect picking is automatic: dev sessions (Expo Go / dev client on Metro) use the live exp:// session URL so the browser returns to the running app; production builds use watchlater://auth/callback. If Metro restarts on a different port, add that exact exp:// URL to the Supabase redirect list.
+
+Delete-account edge function: supabase functions deploy delete-account after supabase secrets set SUPABASE_URL=... SUPABASE_SERVICE_ROLE_KEY=... SUPABASE_ANON_KEY=.... The client wipes the user's rows + local database + reminders even when the function is not deployed; the function additionally removes the auth user (all tables cascade from auth.users).
+
+
+## Global Hits reports and scheduler
+
+Published rankings live in public.global_hit_reports (migrations 202610110002/03: public SELECT, service-role writes). Generation is the generate-global-hits edge function (TMDB Discover, methodology tmdb-popularity-v1, 20 movies + 20 series per report, idempotent: published rows are never rewritten).
+
+Function secrets: TMDB_API_KEY (TMDB v3 key) and HITS_ADMIN_KEY (manual-trigger password). The app never calls the function and never sees either value.
+
+Scheduling (manual dashboard step, NOT done automatically): Edge Functions -> generate-global-hits -> add a daily cron trigger (e.g. 5 0 * * * UTC) that POSTs an empty JSON body with header x-hits-admin-key set to the admin key. The function publishes the last completed month (and last year each January) only when missing, so overlapping runs are safe. December 31 publishes nothing by design: the yearly final generates on January 1 once the data is complete.
+
+Manual trigger: POST https://<ref>.supabase.co/functions/v1/generate-global-hits with apikey header + x-hits-admin-key and body {periodType, periodKey} (add dryRun:true to compute without publishing).
+
+
+## IMDb Top 250 pipeline
+
+Weekly snapshot in public.imdb_ratings (migration 202610110004: public SELECT, service-role writes). The .github/workflows/imdb-ratings.yml Action (Sundays 03:00 UTC, stdlib-only Python, manual Run workflow button available) downloads official IMDb dumps, ranks with IMDb's own weighted formula (25k-vote minimum, adult excluded), maps the top candidates to TMDB ids via /find, and upserts 250 movies + 250 series with stable ranks. Refuses to publish partial lists under 150 titles per side.
+
+Repo secrets required (GitHub Settings -> Secrets -> Actions, manual one-time step): SUPABASE_URL, SUPABASE_SERVICE_ROLE_KEY, TMDB_API_KEY. The app reads the table with the anon key and never sees these values. First run: Actions tab -> imdb-ratings -> Run workflow, then check More -> IMDb Top 250 in the app.
+

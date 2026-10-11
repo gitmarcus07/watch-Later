@@ -23,7 +23,7 @@ function setup(localChanges: PendingWatchStateChange[], remoteChanges: PendingWa
   });
   const cloud: jest.Mocked<CloudWatchStateRepository> = {
     getAuthenticatedUserId: jest.fn().mockResolvedValue('account-1'),
-    fetch: jest.fn().mockResolvedValue(remoteChanges), upsert: jest.fn().mockResolvedValue(undefined),
+    fetch: jest.fn().mockResolvedValue(remoteChanges), upsert: jest.fn().mockResolvedValue(undefined), getInterestedCounts: jest.fn().mockResolvedValue([]),
   };
   return { service: new SyncService(local, cloud), local, cloud, replaceLocal: (changes: PendingWatchStateChange[]) => { localChanges = changes; } };
 }

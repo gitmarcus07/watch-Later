@@ -1,6 +1,7 @@
-import { Pressable, StyleSheet } from 'react-native';
+import { Animated, Pressable, StyleSheet } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { colors, radius } from '@/theme';
+import { usePressScale } from '@/lib/pressScale';
 
 interface IconButtonProps {
   name: keyof typeof Ionicons.glyphMap;
@@ -11,9 +12,12 @@ interface IconButtonProps {
 }
 
 export function IconButton({ name, label, onPress, size = 22, variant = 'default' }: IconButtonProps) {
+  const { pressScaleStyle, pressIn, pressOut } = usePressScale(0.9);
   return (
-    <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} style={({ pressed }) => [styles.button, variant === 'subtle' && styles.subtle, variant === 'accent' && styles.accent, pressed && styles.pressed]}>
-      <Ionicons name={name} size={size} color={variant === 'accent' ? colors.accent : variant === 'subtle' ? colors.textSecondary : colors.textPrimary} />
+    <Pressable accessibilityRole="button" accessibilityLabel={label} onPress={onPress} onPressIn={pressIn} onPressOut={pressOut} style={({ pressed }) => [styles.button, variant === 'subtle' && styles.subtle, variant === 'accent' && styles.accent, pressed && styles.pressed]}>
+      <Animated.View style={pressScaleStyle}>
+        <Ionicons name={name} size={size} color={variant === 'accent' ? colors.accent : variant === 'subtle' ? colors.textSecondary : colors.textPrimary} />
+      </Animated.View>
     </Pressable>
   );
 }

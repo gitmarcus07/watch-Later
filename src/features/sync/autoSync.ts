@@ -8,6 +8,14 @@ export type AutoSyncReason = 'mutation' | 'auth' | 'startup' | 'foreground' | 'c
 export const AUTO_SYNC_DEBOUNCE_MS = 1000;
 /** Cooldown so rapid foreground events do not cause excessive requests. */
 export const AUTO_SYNC_FOREGROUND_COOLDOWN_MS = 15000;
+/** Backoff base/cap for consecutive sync failures. Local work is never blocked. */
+export const AUTO_SYNC_BACKOFF_BASE_MS = 5000;
+export const AUTO_SYNC_BACKOFF_MAX_MS = 900000;
+
+export function backoffDelayMs(consecutiveFailures: number): number {
+  if (consecutiveFailures <= 0) return AUTO_SYNC_DEBOUNCE_MS;
+  return Math.min(AUTO_SYNC_BACKOFF_BASE_MS * 2 ** (consecutiveFailures - 1), AUTO_SYNC_BACKOFF_MAX_MS);
+}
 
 interface AutoSyncDeps {
   getSession: () => { mode: string; userId?: string };
@@ -33,6 +41,7 @@ export class AutoSyncScheduler {
   private timer?: ReturnType<typeof setTimeout>;
   private lastForegroundAt = 0;
   private lastConnected: boolean | undefined;
+  private consecutiveFailures = 0;
 
   constructor(private readonly deps: AutoSyncDeps) {}
 
@@ -40,10 +49,11 @@ export class AutoSyncScheduler {
     const setTimer = this.deps.setTimer ?? setTimeout;
     const clearTimer = this.deps.clearTimer ?? clearTimeout;
     if (this.timer) clearTimer(this.timer);
+    const delay = backoffDelayMs(this.consecutiveFailures);
     this.timer = setTimer(() => {
       this.timer = undefined;
       void this.runOnce();
-    }, AUTO_SYNC_DEBOUNCE_MS);
+    }, delay);
   }
 
   handleForeground(): void {
@@ -74,6 +84,7 @@ export class AutoSyncScheduler {
     this.cancel();
     this.lastForegroundAt = 0;
     this.lastConnected = undefined;
+    this.consecutiveFailures = 0;
   }
 
   private async runOnce(): Promise<void> {
@@ -81,7 +92,9 @@ export class AutoSyncScheduler {
       const session = this.deps.getSession();
       if (session.mode !== 'authenticated' || !session.userId) return;
       await this.deps.sync(session.userId);
+      this.consecutiveFailures = 0;
     } catch {
+      this.consecutiveFailures += 1;
       // Automatic sync must never break the app; SyncService already records
       // retryable status and the durable queue remains intact for later triggers.
     }

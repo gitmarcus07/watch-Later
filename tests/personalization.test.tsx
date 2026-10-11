@@ -5,7 +5,9 @@ import { queryClient } from '@/lib/query/queryClient';
 import { getGreeting, useGreeting } from '@/features/home/greeting';
 import { ProfileAvatar } from '@/components/profile/ProfileAvatar';
 import { useSessionStore } from '@/store/app/sessionStore';
-import SearchScreen from '../app/(tabs)/search';
+import { catalogRepository } from '@/data/remote/catalog/RemoteCatalogRepository';
+import { watchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
+import SearchScreen from '../app/search';
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -104,6 +106,11 @@ describe('profile avatar', () => {
 describe('search empty state', () => {
   beforeEach(() => {
     jest.spyOn(globalThis, 'fetch').mockRejectedValue(new Error('Unmocked network request blocked by personalization test'));
+    // Keep local hooks hermetic: no real SQLite or catalog calls in this UI test.
+    jest.spyOn(catalogRepository, 'getTrending').mockResolvedValue([]);
+    jest.spyOn(watchStateRepository, 'getLibraryStatuses').mockResolvedValue({});
+    jest.spyOn(watchStateRepository, 'getWatchlist').mockResolvedValue([]);
+    jest.spyOn(watchStateRepository, 'getWatchedLibrary').mockResolvedValue([]);
   });
 
   afterEach(() => {
@@ -116,7 +123,7 @@ describe('search empty state', () => {
       renderer = create(<QueryClientProvider client={queryClient}><SearchScreen /></QueryClientProvider>);
     });
     const text = JSON.stringify(renderer.toJSON());
-    expect(text).toContain('Find something to watch tonight');
+    expect(text).toContain('What are you in the mood for?');
     expect(text).not.toMatch(/TMDb|AniList/);
     const input = renderer.root.findByProps({ accessibilityLabel: 'Search movies, shows and anime' });
     expect(input.props.value).toBe('');

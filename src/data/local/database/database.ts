@@ -20,3 +20,22 @@ export function getDatabase(): Promise<SQLite.SQLiteDatabase> {
   }
   return databasePromise;
 }
+
+/**
+ * Wipes all local data: closes the open handle, deletes the database file,
+ * and drops the cached handle so the next `getDatabase()` recreates a fresh
+ * schema via migrations. Used by delete-account; never throws silently —
+ * callers surface failures instead of leaving a half-deleted library.
+ */
+export async function resetLocalDatabase(): Promise<void> {
+  const existing = databasePromise;
+  databasePromise = undefined;
+  if (existing) {
+    try {
+      (await existing).closeAsync();
+    } catch {
+      // Already closed or unusable — deletion proceeds regardless.
+    }
+  }
+  await SQLite.deleteDatabaseAsync(DATABASE_NAME);
+}

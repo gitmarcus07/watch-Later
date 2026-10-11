@@ -1,25 +1,72 @@
 {
   "expo": {
-    "name": "Watch Later",
+    "name": "watch Later",
     "slug": "watch-later",
     "scheme": "watchlater",
     "version": "1.0.0",
     "orientation": "portrait",
-    "userInterfaceStyle": "dark",    "ios": {
+    "backgroundColor": "#070312",
+    "androidStatusBar": {
+      "backgroundColor": "#070312",
+      "barStyle": "light-content"
+    },
+    "icon": "./assets/icon.png",
+    "userInterfaceStyle": "dark",
+    "ios": {
       "supportsTablet": true,
-      "bundleIdentifier": "com.watchlater.app"
+      "bundleIdentifier": "com.watchlater.app",
+      "icon": "./assets/icon.png"
     },
     "android": {
-      "package": "com.watchlater.app"    },
+      "package": "com.watchlater.app",
+      "icon": "./assets/icon.png",
+      "adaptiveIcon": {
+        "foregroundImage": "./assets/adaptive-icon.png",
+        "backgroundColor": "#070312"
+      }
+    },
     "plugins": [
       "expo-router",
       "expo-sqlite",
-      "expo-font"
+      "expo-font",
+      "expo-localization",
+      [
+        "expo-notifications",
+        {
+          "icon": "./assets/notification-icon.png",
+          "color": "#A855F7",
+          "sounds": [
+            "./assets/notification_sound.wav"
+          ]
+        }
+      ],
+      [
+        "expo-splash-screen",
+        {
+          "image": "./assets/splash-blank.png",
+          "imageWidth": 220,
+          "resizeMode": "contain",
+          "backgroundColor": "#070312",
+          "dark": {
+            "image": "./assets/splash-blank.png",
+            "backgroundColor": "#070312"
+          },
+          "android": {
+            "backgroundColor": "#070312"
+          }
+        }
+      ],
+      "expo-web-browser"
     ],
     "experiments": {
       "typedRoutes": true
-    }
+    },
+    "extra": {
+      "router": {},
+      "eas": {
+        "projectId": "7bd40cd9-2078-4894-937d-fa20a0fe376e"
+      }
+    },
+    "owner": "testbot0007"
   }
 }
-
-

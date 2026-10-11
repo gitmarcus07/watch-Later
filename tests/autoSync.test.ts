@@ -35,6 +35,7 @@ function setupSyncService(localChanges: PendingWatchStateChange[], remoteChanges
     getAuthenticatedUserId: jest.fn().mockResolvedValue('account-1'),
     fetch: jest.fn().mockResolvedValue(remoteChanges),
     upsert: jest.fn().mockResolvedValue(undefined),
+    getInterestedCounts: jest.fn().mockResolvedValue([]),
   };
   return { service: new SyncService(local, cloud), local, cloud, setPending: (c: PendingWatchStateChange[]) => { pending = c; } };
 }

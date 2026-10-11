@@ -37,3 +37,69 @@ describe('Supabase favorites security migration', () => {
     expect(sql).not.toContain('with check (true)');
   });
 });
+
+describe('Supabase interested security migration', () => {
+  const sql = readFileSync('supabase/migrations/202610060006_interested.sql', 'utf8').toLowerCase();
+
+  it('keeps raw marks owner-scoped but exposes only aggregated real counts', () => {
+    expect(sql).toContain('alter table public.interested_marks enable row level security');
+    expect(sql).toMatch(/create policy ".*" on public\.interested_marks for select to authenticated using \(user_id = \(select auth\.uid\(\)\)\)/);
+    expect(sql).toContain('grant select, insert, update, delete on public.interested_marks to authenticated');
+    expect(sql).toContain('create or replace function public.get_interested_counts()');
+    expect(sql).toContain('security definer');
+    expect(sql).toContain('grant execute on function public.get_interested_counts() to authenticated');
+    expect(sql).toContain('grant execute on function public.get_interested_counts() to anon');
+    expect(sql).not.toContain('using (true)');
+    expect(sql).not.toContain('with check (true)');
+  });
+});
+
+describe('Supabase series completion migration', () => {
+  const sql = readFileSync('supabase/migrations/202610060007_series_completed.sql', 'utf8').toLowerCase();
+
+  it('adds explicit completion columns without touching RLS ownership', () => {
+    expect(sql).toContain('completed');
+    expect(sql).toContain('completed_at');
+    expect(sql).toContain('alter table public.tracked_series');
+    expect(sql).not.toContain('using (true)');
+    expect(sql).not.toContain('with check (true)');
+  });
+});
+
+describe('Supabase anime episodes migration', () => {
+  const sql = readFileSync('supabase/migrations/202610090009_anime_episodes.sql', 'utf8').toLowerCase();
+
+  it('widens episode_watches to the anilist provider and anime media type', () => {
+    expect(sql).toContain('episode_watches');
+    expect(sql).toContain(`('tmdb', 'anilist')`);
+    expect(sql).toContain(`('series', 'anime')`);
+  });
+});
+
+describe('Supabase OTT releases migration', () => {
+  const sql = readFileSync('supabase/migrations/202610100001_ott_releases.sql', 'utf8').toLowerCase().replace(/\s+/g, ' ');
+
+  it('exposes verified announcements for public read but no client writes', () => {
+    expect(sql).toContain('alter table public.ott_releases enable row level security');
+    expect(sql).toMatch(/create policy ".*" on public\.ott_releases for select to anon, authenticated using \(true\)/);
+    expect(sql).not.toMatch(/for insert to (anon|authenticated)/);
+    expect(sql).not.toMatch(/for update to (anon|authenticated)/);
+    expect(sql).not.toMatch(/for delete to (anon|authenticated)/);
+  });
+
+  it('dedupes per movie, platform, country, and release event with honest precision', () => {
+    expect(sql).toContain('unique (provider, media_type, provider_id, platform, country, is_premiere)');
+    expect(sql).toContain(`check (date_precision in ('exact', 'month', 'year', 'unknown'))`);
+    expect(sql).toContain('last_verified_at');
+  });
+});
+describe('Supabase watchlist priority migration', () => {
+  const sql = readFileSync('supabase/migrations/202610060008_watchlist_priority.sql', 'utf8').toLowerCase();
+
+  it('adds a nullable priority column without touching RLS ownership', () => {
+    expect(sql).toContain('priority');
+    expect(sql).toContain('alter table public.watchlist_entries');
+    expect(sql).not.toContain('using (true)');
+    expect(sql).not.toContain('with check (true)');
+  });
+});

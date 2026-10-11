@@ -35,14 +35,24 @@ interface ToastState {
   id: number;
   message: string;
   type: DialogType;
+  actionLabel?: string;
+  durationMs?: number;
 }
+
+interface ToastOptions {
+  actionLabel?: string;
+  onAction?: () => void;
+  durationMs?: number;
+}
+
+const toastActions = new Map<number, () => void>();
 
 interface DialogStore {
   queue: DialogRequest[];
   toast: ToastState | null;
   enqueue: (request: DialogRequest) => void;
   dismissCurrent: (confirmed: boolean) => void;
-  notify: (message: string, type: DialogType) => void;
+  notify: (message: string, type: DialogType, options?: ToastOptions) => void;
   clearToast: () => void;
 }
 
@@ -76,14 +86,19 @@ export const useDialogStore = create<DialogStore>((set) => ({
     if (current) current.resolve(confirmed);
     return { queue: rest };
   }),
-  notify: (message, type) => {
+  notify: (message, type, options) => {
     if (toastTimer) clearTimeout(toastTimer);
     toastId += 1;
-    set({ toast: { id: toastId, message, type } });
-    toastTimer = setTimeout(() => useDialogStore.getState().clearToast(), 2600);
+    const currentId = toastId;
+    if (options?.onAction) toastActions.set(currentId, options.onAction);
+    else toastActions.delete(currentId);
+    set({ toast: { id: currentId, message, type, actionLabel: options?.actionLabel, durationMs: options?.durationMs } });
+    toastTimer = setTimeout(() => useDialogStore.getState().clearToast(), options?.durationMs ?? 2600);
   },
   clearToast: () => {
     if (toastTimer) { clearTimeout(toastTimer); toastTimer = undefined; }
+    const current = useDialogStore.getState().toast;
+    if (current) toastActions.delete(current.id);
     set({ toast: null });
   },
 }));
@@ -110,8 +125,8 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
 }
 
 /** Shows a small non-blocking toast that dismisses itself. */
-export function showToast(message: string, type: DialogType = 'info'): void {
-  useDialogStore.getState().notify(message, type);
+export function showToast(message: string, type: DialogType = 'info', options?: ToastOptions): void {
+  useDialogStore.getState().notify(message, type, options);
 }
 
 export function useDialog() {
@@ -120,7 +135,7 @@ export function useDialog() {
   return { showDialog, showToast, hideDialog: () => dismissCurrent(false), hideToast: clearToast };
 }
 
-export function DialogCard({ request, onPrimary, onSecondary }: { request: Pick<DialogRequest, 'type' | 'title' | 'message' | 'primaryAction' | 'secondaryAction'>; onPrimary: () => void; onSecondary: () => void }) {
+export function DialogCard({ request, content, onPrimary, onSecondary }: { request: Pick<DialogRequest, 'type' | 'title' | 'message' | 'primaryAction' | 'secondaryAction'>; content?: React.ReactNode; onPrimary: () => void; onSecondary: () => void }) {
   const config = typeConfig[request.type];
   return (
     <View style={styles.card} accessibilityRole="alert" accessibilityLabel={`${request.title}. ${request.message}`} accessibilityLiveRegion="assertive">
@@ -129,6 +144,7 @@ export function DialogCard({ request, onPrimary, onSecondary }: { request: Pick<
       </View>
       <AppText variant="heading3" style={styles.title}>{request.title}</AppText>
       {request.message ? <AppText variant="bodySmall" muted style={styles.message}>{request.message}</AppText> : null}
+      {content}
       <View style={styles.actions}>
         {request.secondaryAction ? <View style={styles.actionButton}><AppButton label={request.secondaryAction.label} variant="secondary" onPress={onSecondary} /></View> : null}
         <View style={styles.actionButton}>
@@ -147,6 +163,20 @@ export function ToastCard({ toast }: { toast: ToastState }) {
     <View style={styles.toast} accessibilityRole="alert" accessibilityLabel={toast.message} accessibilityLiveRegion="polite">
       <Ionicons name={config.icon} size={17} color={config.color} />
       <AppText variant="bodySmall" style={styles.toastText} numberOfLines={2}>{toast.message}</AppText>
+      {toast.actionLabel ? (
+        <Pressable
+          accessibilityRole="button"
+          accessibilityLabel={toast.actionLabel}
+          onPress={() => {
+            const action = toastActions.get(toast.id);
+            useDialogStore.getState().clearToast();
+            action?.();
+          }}
+          style={styles.toastAction}
+        >
+          <AppText variant="label" style={styles.toastActionText}>{toast.actionLabel}</AppText>
+        </Pressable>
+      ) : null}
     </View>
   );
 }
@@ -196,7 +226,7 @@ export function DialogProvider({ children }: { children: React.ReactNode }) {
     <View style={styles.root}>
       {children}
       {current ? <ActiveDialog key={current.id} request={current} /> : null}
-      {toast ? <View pointerEvents="none" style={styles.toastWrap}><ToastCard toast={toast} /></View> : null}
+      {toast ? <View pointerEvents="box-none" style={styles.toastWrap}><View pointerEvents="auto" style={styles.toastPosition}><ToastCard toast={toast} /></View></View> : null}
     </View>
   );
 }
@@ -215,6 +245,9 @@ const styles = StyleSheet.create({
   destructiveLabel: { color: colors.background },
   pressed: { opacity: 0.82 },
   toastWrap: { position: 'absolute', left: spacing.xl, right: spacing.xl, bottom: 108, alignItems: 'center' },
+  toastPosition: { maxWidth: 420, width: '100%', alignItems: 'center' },
   toast: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, backgroundColor: colors.surfaceElevated, borderWidth: 1, borderColor: colors.border, borderRadius: radius.pill, paddingHorizontal: spacing.lg, paddingVertical: spacing.md, maxWidth: 420 },
   toastText: { color: colors.textPrimary, flexShrink: 1 },
+  toastAction: { paddingHorizontal: spacing.sm, paddingVertical: spacing.xs },
+  toastActionText: { color: colors.accent },
 });

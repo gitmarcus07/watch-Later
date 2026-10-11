@@ -1,4 +1,4 @@
-export type MediaProvider = 'tmdb' | 'anilist';
+export type MediaProvider = 'tmdb' | 'anilist' | 'tvdb';
 export type CatalogMediaType = 'movie' | 'series' | 'anime';
 
 export interface MediaIdentity {
@@ -12,12 +12,28 @@ export interface MediaGenre {
   name: string;
 }
 
+export interface MediaCastMember {
+  /** Real name of the performer. */
+  name: string;
+  /** Character played, when known. */
+  character?: string;
+  /** Headshot URL, when known. */
+  imageUrl?: string;
+}
+
 export interface SeasonSummary {
   seasonNumber: number;
   name: string;
   episodeCount?: number;
   airDate?: string;
   posterUrl?: string;
+  /**
+   * Anime-only: AniList entries split cours/seasons into separate nodes, so a
+   * season can point at a different provider entry (and MAL id) than the
+   * title that was opened. TMDb seasons never set these.
+   */
+  refProviderId?: string;
+  refMalId?: number;
 }
 
 export interface CatalogMedia extends MediaIdentity {
@@ -44,7 +60,31 @@ export interface CatalogMedia extends MediaIdentity {
   animeSeason?: string;
   popularity?: number;
   studios?: string[];
+  /** MyAnimeList ID for anime (from AniList). Used to fetch episode lists. */
+  malId?: number;
+  /** TMDb numeric id bridged from TVDB remote IDs. Unlocks TMDb ratings and watch providers for TVDB titles. */
+  tmdbRefId?: string;
   episodeMetadata: 'available' | 'unavailable';
+  imdbId?: string;
+  trailerKey?: string;
+  watchProviders?: WatchProviderGroup[];
+  /** Top-billed cast with headshots (TVDB titles). Empty when unknown. */
+  cast?: MediaCastMember[];
+  /** Director names (TVDB titles). Empty when unknown. */
+  directors?: string[];
+  /** Age-rating certification (TVDB titles, e.g. "TV-MA"). Undefined when unknown. */
+  contentRating?: string;
+}
+
+export interface WatchProvider {
+  id: number;
+  name: string;
+  logoUrl?: string;
+}
+
+export interface WatchProviderGroup {
+  category: 'stream' | 'rent' | 'buy';
+  providers: WatchProvider[];
 }
 
 export interface MediaEpisode extends MediaIdentity {

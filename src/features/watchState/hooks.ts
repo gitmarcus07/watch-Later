@@ -1,8 +1,15 @@
 import { useMutation, useQuery, useQueryClient } from '@tanstack/react-query';
 import type { CatalogMedia, CatalogSeason, MediaIdentity } from '@/domain/models/media';
+import type { InterestedCount, WatchPriority } from '@/domain/models/watchState';
 import { catalogRepository } from '@/data/remote/catalog/RemoteCatalogRepository';
+import { cloudWatchStateRepository } from '@/data/remote/supabase/SupabaseWatchStateRepository';
 import { watchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
 import { scheduleAutoSync } from '@/features/sync/autoSync';
+
+function maybePromptRating(_media: CatalogMedia): void {
+  // Ratings UI was removed; marking watched no longer prompts. Kept as a
+  // no-op so watch mutations stay untouched.
+}
 
 export const watchKeys = {
   all: ['watch'] as const,
@@ -11,6 +18,8 @@ export const watchKeys = {
   progress: ['watch', 'series-progress'] as const,
   continue: ['watch', 'continue'] as const,
   favorites: ['watch', 'favorites'] as const,
+  interested: ['watch', 'interested'] as const,
+  interestedCounts: ['watch', 'interested-counts'] as const,
   lists: ['watch', 'lists'] as const,
   history: ['watch', 'history'] as const,
   media: (identity: MediaIdentity) => ['watch', 'media', identity.provider, identity.mediaType, identity.providerId] as const,
@@ -46,6 +55,8 @@ export function useTrackedMedia(identity: MediaIdentity | undefined) {
     queryKey: identity ? watchKeys.media(identity) : ['watch', 'media', 'none'],
     queryFn: async () => identity ? (await watchStateRepository.getTrackedMedia(identity)) ?? null : null,
     enabled: Boolean(identity),
+    // Serve cached status instantly so action buttons never sit disabled on a slow disk.
+    staleTime: 30_000,
   });
 }
 
@@ -54,6 +65,7 @@ export function useCachedSeason(identity: MediaIdentity | undefined, seasonNumbe
     queryKey: identity && seasonNumber !== undefined ? ['watch', 'cached-season', identity.provider, identity.providerId, seasonNumber] : ['watch', 'cached-season', 'none'],
     queryFn: async () => identity && seasonNumber !== undefined ? (await watchStateRepository.getCachedSeason(identity, seasonNumber)) ?? null : null,
     enabled: Boolean(identity && seasonNumber !== undefined),
+    staleTime: 30_000,
   });
 }
 
@@ -64,6 +76,7 @@ export function useLibraryStatuses(items: CatalogMedia[]) {
     queryKey: ['watch', 'statuses', key],
     queryFn: () => watchStateRepository.getLibraryStatuses(identities),
     enabled: identities.length > 0,
+    staleTime: 30_000,
   });
 }
 
@@ -72,6 +85,7 @@ export function useWatchlistStatus(identity: MediaIdentity | undefined) {
     queryKey: identity ? [...watchKeys.media(identity), 'watchlist'] : ['watch', 'watchlist', 'none'],
     queryFn: () => identity ? watchStateRepository.isInWatchlist(identity) : Promise.resolve(false),
     enabled: Boolean(identity),
+    staleTime: 30_000,
   });
 }
 
@@ -80,6 +94,7 @@ export function useMovieWatchedStatus(identity: MediaIdentity | undefined) {
     queryKey: identity ? [...watchKeys.media(identity), 'movie-watched'] : ['watch', 'movie-watched', 'none'],
     queryFn: () => identity ? watchStateRepository.isMovieWatched(identity) : Promise.resolve(false),
     enabled: Boolean(identity?.mediaType === 'movie'),
+    staleTime: 30_000,
   });
 }
 
@@ -88,6 +103,7 @@ export function useSeriesTrackingStatus(identity: MediaIdentity | undefined) {
     queryKey: identity ? [...watchKeys.media(identity), 'tracking'] : ['watch', 'tracking', 'none'],
     queryFn: () => identity ? watchStateRepository.isSeriesTracked(identity) : Promise.resolve(false),
     enabled: Boolean(identity && identity.mediaType !== 'movie'),
+    staleTime: 30_000,
   });
 }
 
@@ -96,6 +112,7 @@ export function useWatchedEpisodeIds(identity: MediaIdentity | undefined, season
     queryKey: identity && seasonNumber !== undefined ? watchKeys.episodes(identity, seasonNumber) : ['watch', 'episodes', 'none'],
     queryFn: () => identity && seasonNumber !== undefined ? watchStateRepository.getWatchedEpisodeIds(identity, seasonNumber) : Promise.resolve([]),
     enabled: Boolean(identity && seasonNumber !== undefined),
+    staleTime: 30_000,
   });
 }
 
@@ -118,11 +135,19 @@ export function useWatchlistMutation(media: CatalogMedia, currentlySaved: boolea
   return mutation;
 }
 
+export function useSaveToWatchlist(media: CatalogMedia) {
+  const invalidate = useInvalidateWatchState();
+  return useMutation({
+    mutationFn: (priority: WatchPriority) => watchStateRepository.saveToWatchlist(media, priority),
+    onSuccess: () => invalidate(true),
+  });
+}
+
 export function useMovieWatchedMutation(media: CatalogMedia, currentlyWatched: boolean) {
   const invalidate = useInvalidateWatchState();
   return useMutation({
     mutationFn: () => watchStateRepository.markMovieWatched(media, !currentlyWatched),
-    onSuccess: () => invalidate(true),
+    onSuccess: () => { invalidate(true); if (!currentlyWatched) maybePromptRating(media); },
   });
 }
 
@@ -134,12 +159,32 @@ export function useSeriesTrackingMutation(media: CatalogMedia, currentlyTracked:
   });
 }
 
+export function useSeriesCompleteMutation(media: CatalogMedia) {
+  const invalidate = useInvalidateWatchState();
+  const state = useSeriesProgress();
+  const complete = state.data?.find((item) => item.media.id === media.id)?.isComplete ?? false;
+  const mutation = useMutation({
+    mutationFn: () => watchStateRepository.setSeriesComplete(media, !complete),
+    onSuccess: () => invalidate(true),
+  });
+  return { ...mutation, complete, toggle: mutation.mutate, toggleAsync: mutation.mutateAsync, isMutating: mutation.isPending };
+}
+
+export function useAnimeWatchedCount(identity: MediaIdentity | undefined) {
+  return useQuery({
+    queryKey: identity ? [...watchKeys.media(identity), 'anime-progress'] : ['watch', 'anime-progress', 'none'],
+    queryFn: () => identity ? watchStateRepository.getAnimeWatchedCount(identity) : Promise.resolve(0),
+    enabled: Boolean(identity && identity.mediaType === 'anime'),
+    staleTime: 30_000,
+  });
+}
+
 export function useToggleMovieWatched(media: CatalogMedia) {
   const invalidate = useInvalidateWatchState();
   const state = useMovieWatchedStatus(media);
   const mutation = useMutation({
     mutationFn: () => watchStateRepository.markMovieWatched(media, !state.data),
-    onSuccess: () => invalidate(true),
+    onSuccess: () => { invalidate(true); if (!state.data) maybePromptRating(media); },
   });
   return { ...state, toggle: mutation.mutate, toggleAsync: mutation.mutateAsync, isMutating: mutation.isPending };
 }
@@ -163,20 +208,51 @@ export function useStoreSeason(media: CatalogMedia) {
 }
 
 export function useToggleEpisode(media: CatalogMedia, season: CatalogSeason) {
+  const queryClient = useQueryClient();
   const invalidate = useInvalidateWatchState();
   const episodes = useWatchedEpisodeIds(media, season.seasonNumber);
+  const key = watchKeys.episodes(media, season.seasonNumber);
   const mutation = useMutation({
+    // Flip the checkmark instantly; the SQLite write lands right after and
+    // the progress lists refresh from it. Rolls back on failure.
+    onMutate: async ({ episode, watched }: { episode: CatalogSeason['episodes'][number]; watched: boolean }) => {
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData<string[]>(key) ?? [];
+      queryClient.setQueryData<string[]>(
+        key,
+        watched ? [...new Set([...previous, episode.providerId])] : previous.filter((id) => id !== episode.providerId),
+      );
+      return { previous };
+    },
+    onError: (_error, _variables, context) => {
+      if (context) queryClient.setQueryData(key, context.previous);
+    },
     mutationFn: ({ episode, watched }: { episode: CatalogSeason['episodes'][number]; watched: boolean }) => watchStateRepository.setEpisodeWatched(media, season, episode, watched),
-    onSuccess: () => invalidate(true),
+    onSuccess: (_data, variables) => { invalidate(true); if (variables.watched) maybePromptRating(media); },
+    onSettled: () => { void queryClient.invalidateQueries({ queryKey: key }); },
   });
   return { ...mutation, watchedIds: episodes.data ?? [], toggle: mutation.mutate, isMutating: mutation.isPending };
 }
 
 export function useToggleSeason(media: CatalogMedia, seasonNumber: number) {
+  const queryClient = useQueryClient();
   const invalidate = useInvalidateWatchState();
   return useMutation({
+    // Flip the whole season instantly; the batched SQLite write (one row per
+    // episode plus sync queue entries) lands right after.
+    onMutate: async ({ watched, season }: { watched: boolean; season: CatalogSeason }) => {
+      const key = watchKeys.episodes(media, season.seasonNumber);
+      await queryClient.cancelQueries({ queryKey: key });
+      const previous = queryClient.getQueryData<string[]>(key) ?? [];
+      queryClient.setQueryData<string[]>(key, watched ? season.episodes.map((episode) => episode.providerId) : []);
+      return { previous, key };
+    },
+    onError: (_error, _variables, context) => {
+      if (context) queryClient.setQueryData(context.key, context.previous);
+    },
     mutationFn: ({ watched, season }: { watched: boolean; season: CatalogSeason }) => watchStateRepository.setSeasonWatched(media, season, watched),
-    onSuccess: () => invalidate(true),
+    onSuccess: (_data, variables) => { invalidate(true); if (variables.watched) maybePromptRating(media); },
+    onSettled: (_data, _error, variables) => { void queryClient.invalidateQueries({ queryKey: watchKeys.episodes(media, variables.season.seasonNumber) }); },
   });
 }
 
@@ -193,7 +269,7 @@ export function useSetSeriesWatched(media: CatalogMedia) {
       }));
       return watchStateRepository.setSeriesWatched(media, seasons, watched);
     },
-    onSuccess: () => invalidate(true),
+    onSuccess: (_data, watched) => { invalidate(true); if (watched) maybePromptRating(media); },
   });
 }
 
@@ -211,6 +287,7 @@ export function useFavoriteStatus(identity: MediaIdentity | undefined) {
     queryKey: identity ? [...watchKeys.media(identity), 'favorite'] : ['watch', 'favorite', 'none'],
     queryFn: () => identity ? watchStateRepository.isFavorite(identity) : Promise.resolve(false),
     enabled: Boolean(identity),
+    staleTime: 30_000,
   });
 }
 
@@ -223,11 +300,125 @@ export function useFavoriteMutation(media: CatalogMedia, currentlyFavorite: bool
   return mutation;
 }
 
+export function useInterested() {
+  return useQuery({ queryKey: watchKeys.interested, queryFn: () => watchStateRepository.getInterested() });
+}
+
+export function useInterestedStatus(identity: MediaIdentity | undefined) {
+  return useQuery({
+    queryKey: identity ? [...watchKeys.media(identity), 'interested'] : ['watch', 'interested', 'none'],
+    queryFn: () => identity ? watchStateRepository.isInterested(identity) : Promise.resolve(false),
+    enabled: Boolean(identity),
+    staleTime: 30_000,
+  });
+}
+
+export function useInterestedMutation(media: CatalogMedia, currentlyInterested: boolean) {
+  const invalidate = useInvalidateWatchState();
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => watchStateRepository.setInterested(media, !currentlyInterested),
+    onSuccess: () => {
+      invalidate(true);
+      void queryClient.invalidateQueries({ queryKey: watchKeys.interestedCounts });
+    },
+  });
+}
+
+export function useInterestedCounts(): { data: Map<string, number>; isLoading: boolean; isError: boolean; refetch: () => void } {
+  const query = useQuery({
+    queryKey: watchKeys.interestedCounts,
+    queryFn: (): Promise<InterestedCount[]> => cloudWatchStateRepository.getInterestedCounts(),
+    staleTime: 60_000,
+    gcTime: 5 * 60_000,
+    retry: 1,
+  });
+  const counts = new Map<string, number>();
+  for (const row of query.data ?? []) {
+    counts.set(`${row.provider}:${row.mediaType}:${row.providerId}`, row.count);
+  }
+  return { data: counts, isLoading: query.isLoading, isError: query.isError, refetch: () => void query.refetch() };
+}
+
 export function useCustomLists() {
   return useQuery({ queryKey: watchKeys.lists, queryFn: () => watchStateRepository.getCustomLists() });
 }
 
-export function useCustomList(id: string | undefined) {
+export function useFolders() {
+  return useQuery({ queryKey: [...watchKeys.lists, 'folders'], queryFn: () => watchStateRepository.getFolders() });
+}
+
+export function useCreateFolder() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (name: string) => watchStateRepository.createFolder(name),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: watchKeys.lists }); },
+  });
+}
+
+export function useDeleteFolder() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: string) => watchStateRepository.deleteFolder(id),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: watchKeys.lists }); },
+  });
+}
+
+export function useUpdateCustomList() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ id, patch }: { id: string; patch: { name?: string; icon?: string | null; color?: string | null; folderId?: string | null } }) => watchStateRepository.updateCustomList(id, patch),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: watchKeys.lists }); },
+  });
+}
+
+export function useMoveWatchlistItem() {
+  const invalidate = useInvalidateWatchState();
+  return useMutation({
+    mutationFn: ({ identity, direction }: { identity: MediaIdentity; direction: -1 | 1 }) => watchStateRepository.moveWatchlistItem(identity, direction),
+    onSuccess: () => invalidate(true),
+  });
+}
+
+export function useMoveCustomListItem() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ listId, identity, direction }: { listId: string; identity: MediaIdentity; direction: -1 | 1 }) => watchStateRepository.moveCustomListItem(listId, identity, direction),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: watchKeys.lists }); },
+  });
+}
+
+export function useTrash() {
+  return useQuery({ queryKey: [...watchKeys.lists, 'trash'], queryFn: () => watchStateRepository.getTrash() });
+}
+
+export function useRestoreTrashItem() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: (id: number) => watchStateRepository.restoreTrashItem(id),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: watchKeys.all });
+      void queryClient.invalidateQueries({ queryKey: [...watchKeys.lists, 'trash'] });
+      scheduleAutoSync('mutation');
+    },
+  });
+}
+
+export function useClearTrash() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => watchStateRepository.clearTrash(),
+    onSuccess: () => { void queryClient.invalidateQueries({ queryKey: [...watchKeys.lists, 'trash'] }); },
+  });
+}
+
+export function useCreateCustomEntry() {
+  const invalidate = useInvalidateWatchState();
+  return useMutation({
+    mutationFn: (input: { title: string; year?: number; mediaType: CatalogMedia['mediaType']; notes?: string }) => watchStateRepository.createCustomEntry(input),
+    onSuccess: () => invalidate(true),
+  });
+}export function useCustomList(id: string | undefined) {
   return useQuery({
     queryKey: id ? [...watchKeys.lists, id] : ['watch', 'lists', 'none'],
     queryFn: async () => id ? (await watchStateRepository.getCustomList(id)) ?? null : null,
@@ -269,4 +460,42 @@ export function useRemoveFromCustomList() {
 
 export function useViewingHistory(limit = 50) {
   return useQuery({ queryKey: [...watchKeys.history, limit], queryFn: () => watchStateRepository.getViewingHistory(limit) });
+}
+
+export function useUpcomingEpisodes() {
+  return useQuery({ queryKey: [...watchKeys.all, 'upcoming'], queryFn: () => watchStateRepository.getUpcomingEpisodes() });
+}
+
+export function useUserRating(identity: MediaIdentity | undefined) {  return useQuery({
+    queryKey: identity ? [...watchKeys.media(identity), 'rating'] : ['watch', 'rating', 'none'],
+    queryFn: async () => identity ? (await watchStateRepository.getUserRating(identity)) ?? null : null,
+    enabled: Boolean(identity),
+  });
+}
+
+export function useUserRatings() {
+  return useQuery({ queryKey: [...watchKeys.all, 'ratings'], queryFn: () => watchStateRepository.getUserRatings() });
+}
+
+export function useSetUserRating() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: ({ media, rating, thumbs }: { media: CatalogMedia; rating: number | null; thumbs: -1 | 0 | 1 }) =>
+      watchStateRepository.setUserRating(media, rating, thumbs),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: watchKeys.all });
+      scheduleAutoSync('mutation');
+    },
+  });
+}
+
+export function useClearAllRatings() {
+  const queryClient = useQueryClient();
+  return useMutation({
+    mutationFn: () => watchStateRepository.clearAllRatings(),
+    onSuccess: () => {
+      void queryClient.invalidateQueries({ queryKey: watchKeys.all });
+      scheduleAutoSync('mutation');
+    },
+  });
 }

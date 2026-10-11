@@ -9,7 +9,6 @@ import { SyncService } from '@/features/sync/SyncService';
 import { createSqliteTestAdapter } from './sqliteTestAdapter';
 import { useAppearanceStore } from '@/store/app/appearanceStore';
 import { useNotificationStore } from '@/store/app/notificationStore';
-import AppearanceScreen from '../app/settings/appearance';
 import NotificationsScreen from '../app/settings/notifications';
 import AboutScreen from '../app/about';
 import PrivacyScreen from '../app/privacy';
@@ -31,6 +30,7 @@ jest.mock('expo-linear-gradient', () => ({ LinearGradient: 'View' }));
 jest.mock('expo-router', () => ({
   useRouter: () => ({ push: jest.fn(), back: jest.fn(), replace: jest.fn() }),
   useLocalSearchParams: () => ({}),
+  useFocusEffect: () => undefined,
 }));
 
 jest.mock('expo-constants', () => ({ __esModule: true, default: { expoConfig: { version: '1.0.0' } } }));
@@ -88,6 +88,7 @@ describe('favorites', () => {
       getAuthenticatedUserId: jest.fn().mockResolvedValue('account-1'),
       fetch: jest.fn().mockResolvedValue([]),
       upsert: jest.fn().mockResolvedValue(undefined),
+      getInterestedCounts: jest.fn().mockResolvedValue([]),
     };
     const title = movie(12);
     await repository.setFavorite(title, true);
@@ -229,14 +230,17 @@ describe('settings stores', () => {
 describe('more menu and static screens', () => {
   it('11-17. every more row navigates to a real route', () => {
     const more = readFileSync('app/(tabs)/more.tsx', 'utf8');
-    for (const route of ['/settings/appearance', '/settings/notifications', '/lists', '/favorites', '/history', '/about', '/privacy']) {
+    for (const route of ['/settings/notifications', '/favorites', '/upcoming', '/about', '/privacy']) {
       expect(more).toContain(route);
+    }
+    for (const removed of ['/settings/ratings', '/settings/appearance', '/collections', '/trash', '/history']) {
+      expect(more).not.toContain(removed);
     }
     expect(more).not.toContain('onPress={() => undefined}');
   });
 
   it('37-40. settings and info screens render', async () => {
-    for (const Screen of [AppearanceScreen, NotificationsScreen, AboutScreen, PrivacyScreen]) {
+    for (const Screen of [NotificationsScreen, AboutScreen, PrivacyScreen]) {
       let renderer!: ReturnType<typeof create>;
       await act(async () => { renderer = create(<Screen />); });
       expect(renderer.toJSON()).toBeTruthy();

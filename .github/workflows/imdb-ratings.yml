@@ -1,0 +1,26 @@
+name: imdb-ratings
+
+# Weekly IMDb Top 250 snapshot (Sundays 03:00 UTC). The Python script uses
+# only the standard library: official IMDb dumps + TMDB id mapping, no
+# scraping. Fails loudly (publishes nothing) when either list resolves
+# poorly, so a broken upstream run keeps last week's data.
+on:
+  schedule:
+    - cron: "0 3 * * 0"
+  workflow_dispatch:
+
+jobs:
+  build:
+    runs-on: ubuntu-latest
+    timeout-minutes: 30
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+      - name: Build and publish IMDb Top 250
+        run: python3 .github/scripts/build_imdb_top.py
+        env:
+          SUPABASE_URL: ${{ secrets.SUPABASE_URL }}
+          SUPABASE_SERVICE_ROLE_KEY: ${{ secrets.SUPABASE_SERVICE_ROLE_KEY }}
+          TMDB_API_KEY: ${{ secrets.TMDB_API_KEY }}

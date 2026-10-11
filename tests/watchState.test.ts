@@ -35,12 +35,12 @@ describe('Phase 4 SQLite watch state', () => {
 
   afterEach(() => adapter.close());
 
-  it('migrates a fresh database to version 7 with watch state and durable sync tables', async () => {
+  it('migrates a fresh database to version 16 with watch state and durable sync tables', async () => {
     const version = await adapter.database.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
     const tables = await adapter.database.getAllAsync<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'");
     const indexes = await adapter.database.getAllAsync<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'");
-    expect(version?.user_version).toBe(7);
-    expect(tables.map(({ name }) => name)).toEqual(expect.arrayContaining(['tracked_media', 'watchlist_entries', 'movie_watches', 'tracked_series', 'tracked_seasons', 'tracked_episodes', 'sync_queue', 'account_binding', 'favorite_entries', 'custom_lists', 'custom_list_items']));
+    expect(version?.user_version).toBe(16);
+    expect(tables.map(({ name }) => name)).toEqual(expect.arrayContaining(['tracked_media', 'watchlist_entries', 'movie_watches', 'tracked_series', 'tracked_seasons', 'tracked_episodes', 'sync_queue', 'account_binding', 'favorite_entries', 'custom_lists', 'custom_list_items', 'user_ratings', 'list_folders', 'deleted_items', 'interested_entries', 'anime_progress']));
     expect(indexes.map(({ name }) => name)).toEqual(expect.arrayContaining(['idx_watchlist_added', 'idx_movie_watches_date', 'idx_tracked_series_updated', 'idx_tracked_episodes_series_order', 'idx_tracked_episodes_watched']));
   });
 
@@ -130,7 +130,7 @@ describe('Phase 4 SQLite watch state', () => {
       'is_deleted', 'updated_at', 'payload', 'retry_count', 'last_error',
     ]));
     expect(queued).toMatchObject({ id: 1, entity_type: 'movie', entity_key: 'tmdb:movie:7', provider_id: '7', updated_at: '2026-01-02T03:04:05.000Z', payload: '{}', retry_count: 2, last_error: 'retry later' });
-    expect(version?.user_version).toBe(7);
+    expect(version?.user_version).toBe(16);
 
     await runMigrations(legacy.database);
     expect(await legacy.database.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM sync_queue')).toEqual({ count: 1 });
@@ -144,7 +144,7 @@ describe('Phase 4 SQLite watch state', () => {
     const preserved = await legacy.database.getFirstAsync<{ value: string }>("SELECT value FROM app_metadata WHERE key = 'install'");
     const versions = await legacy.database.getAllAsync<{ version: number }>('SELECT version FROM schema_migrations ORDER BY version');
     expect(preserved?.value).toBe('kept');
-    expect(versions.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5, 6, 7]);
+    expect(versions.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
     legacy.close();
   });
 
@@ -165,13 +165,14 @@ describe('Phase 4 SQLite watch state', () => {
     await repository.addToWatchlist(movie);
     await repository.addToWatchlist(movie);
     await repository.markMovieWatched(movie, true);
-    const firstWatch = await adapter.database.getFirstAsync<{ watched_at: string }>('SELECT watched_at FROM movie_watches WHERE media_id = ?', movie.id);
+    const firstWatch = await adapter.database.getFirstAsync<{ watched_at: string; rewatch_count: number }>('SELECT watched_at, rewatch_count FROM movie_watches WHERE media_id = ?', movie.id);
+    expect(firstWatch?.rewatch_count ?? 0).toBe(0);
     await repository.markMovieWatched(movie, true);
-    const repeatedWatch = await adapter.database.getFirstAsync<{ watched_at: string }>('SELECT watched_at FROM movie_watches WHERE media_id = ?', movie.id);
+    const repeatedWatch = await adapter.database.getFirstAsync<{ watched_at: string; rewatch_count: number }>('SELECT watched_at, rewatch_count FROM movie_watches WHERE media_id = ?', movie.id);
+    expect(repeatedWatch?.rewatch_count).toBe(1);
     const reloaded = new SqliteWatchStateRepository(async () => adapter.database);
     expect((await reloaded.getWatchlist()).map(({ media }) => media.id)).toEqual([movie.id]);
     expect(await reloaded.isMovieWatched(movie)).toBe(true);
-    expect(repeatedWatch?.watched_at).toBe(firstWatch?.watched_at);
     await reloaded.removeFromWatchlist(movie);
     expect(await reloaded.isMovieWatched(movie)).toBe(true);
     expect(await reloaded.getWatchlist()).toHaveLength(0);
@@ -278,4 +279,105 @@ describe('Phase 4 SQLite watch state', () => {
     expect(await repository.getWatchedEpisodeIds(anime, 1)).toEqual([]);
     await expect(repository.setSeriesWatched(anime, [], true)).rejects.toMatchObject({ kind: 'catalog' });
   });
+
+  it('marks anime complete with an explicit flag and syncs it without episodes', async () => {
+    const anime = mapAniListAnime({ id: 43, title: { english: 'Anime 43' }, description: 'Anime', episodes: 12, genres: [] });
+    await repository.setSeriesComplete(anime, true);
+    expect(await repository.isSeriesTracked(anime)).toBe(true);
+    const progress = await repository.getSeriesProgress();
+    expect(progress).toEqual(expect.arrayContaining([expect.objectContaining({ media: expect.objectContaining({ id: anime.id }), isComplete: true })]));
+    const pending = await repository.getPendingChanges();
+    expect(pending).toEqual(expect.arrayContaining([expect.objectContaining({ entityType: 'series', entityKey: anime.id, completed: true, deleted: false })]));
+    await repository.setSeriesComplete(anime, false);
+    expect((await repository.getSeriesProgress()).find((item) => item.media.id === anime.id)?.isComplete).toBe(false);
+  });
+
+  it('applies remote series completion flags without touching episodes', async () => {
+    const anime = mapAniListAnime({ id: 44, title: { english: 'Anime 44' }, description: 'Anime', genres: [] });
+    await repository.applyRemoteChanges([{
+      id: -1, entityType: 'series', entityKey: anime.id, provider: anime.provider,
+      mediaType: anime.mediaType, providerId: anime.providerId, deleted: false,
+      updatedAt: new Date().toISOString(), media: anime, completed: true, retryCount: 0,
+    }]);
+    expect(await repository.isSeriesTracked(anime)).toBe(true);
+    expect((await repository.getSeriesProgress()).find((item) => item.media.id === anime.id)?.isComplete).toBe(true);
+  });
+
+  it('upgrades a pre-v11 tracked_series table with completion columns', async () => {
+    const columns = await adapter.database.getAllAsync<{ name: string }>('PRAGMA table_info(tracked_series)');
+    expect(columns.map(({ name }) => name)).toEqual(expect.arrayContaining(['completed', 'completed_at']));
+  });
+
+  it('tracks manual anime episode counts locally with clamping', async () => {
+    const anime = mapAniListAnime({ id: 45, title: { english: 'Anime 45' }, description: 'Anime', episodes: 25, genres: [] });
+    expect(await repository.getAnimeWatchedCount(anime)).toBe(0);
+    await repository.setAnimeWatchedCount(anime, 7);
+    expect(await repository.getAnimeWatchedCount(anime)).toBe(7);
+    await repository.setAnimeWatchedCount(anime, -3);
+    expect(await repository.getAnimeWatchedCount(anime)).toBe(0);
+    await expect(repository.setAnimeWatchedCount(createMovie(46), 2)).rejects.toMatchObject({ kind: 'validation' });
+  });
+
+  it('saves watchlist priorities without moving entries and syncs them', async () => {
+    const movie = createMovie(77);
+    await repository.saveToWatchlist(movie, 'someday');
+    expect(await repository.getWatchlist()).toEqual([expect.objectContaining({ media: expect.objectContaining({ id: movie.id }), priority: 'someday' })]);
+    await repository.saveToWatchlist(movie, 'asap');
+    const entries = await repository.getWatchlist();
+    expect(entries).toHaveLength(1);
+    expect(entries[0]).toMatchObject({ priority: 'asap' });
+    expect(await repository.getPendingChanges()).toEqual(expect.arrayContaining([
+      expect.objectContaining({ entityType: 'watchlist', entityKey: movie.id, priority: 'asap', deleted: false }),
+    ]));
+  });
+
+  it('applies remote watchlist priorities while keeping local ones on legacy rows', async () => {
+    const movie = createMovie(78);
+    await repository.saveToWatchlist(movie, 'weekend');
+    await repository.applyRemoteChanges([{
+      id: -1, entityType: 'watchlist', entityKey: movie.id, provider: movie.provider,
+      mediaType: movie.mediaType, providerId: movie.providerId, deleted: false,
+      updatedAt: new Date().toISOString(), media: movie, retryCount: 0,
+    }]);
+    expect((await repository.getWatchlist()).find((entry) => entry.media.id === movie.id)?.priority).toBe('weekend');
+    await repository.applyRemoteChanges([{
+      id: -1, entityType: 'watchlist', entityKey: movie.id, provider: movie.provider,
+      mediaType: movie.mediaType, providerId: movie.providerId, deleted: false,
+      updatedAt: new Date().toISOString(), media: movie, priority: 'asap', retryCount: 0,
+    }]);
+    expect((await repository.getWatchlist()).find((entry) => entry.media.id === movie.id)?.priority).toBe('asap');
+  });
+
+  it('stores tvdb titles across watchlist, favorites, watches, and episodes', async () => {
+    const movie: CatalogMedia = {
+      provider: 'tvdb', mediaType: 'movie', providerId: '290272', id: 'tvdb:movie:290272',
+      title: 'Dune: Part Two', genres: [], episodeMetadata: 'unavailable',
+    };
+    const series: CatalogMedia = {
+      provider: 'tvdb', mediaType: 'series', providerId: '81189', id: 'tvdb:series:81189',
+      title: 'Breaking Bad', genres: [], episodeMetadata: 'available',
+      seasonSummaries: [{ seasonNumber: 1, name: 'Season 1', episodeCount: 2 }],
+    };
+    const episode: MediaEpisode = {
+      provider: 'tvdb', mediaType: 'series', providerId: '111', seriesId: '81189',
+      seasonNumber: 1, episodeNumber: 1, title: 'Pilot',
+    };
+    const season: CatalogSeason = {
+      series: { provider: 'tvdb', mediaType: 'series', providerId: '81189' },
+      seasonNumber: 1, name: 'Season 1',
+      episodes: [episode, { ...episode, providerId: '112', episodeNumber: 2, title: 'Second' }],
+    };
+    await repository.saveToWatchlist(movie, 'asap');
+    await expect(repository.isInWatchlist({ provider: 'tvdb', mediaType: 'movie', providerId: '290272' })).resolves.toBe(true);
+    await repository.setFavorite(movie, true);
+    await expect(repository.isFavorite({ provider: 'tvdb', mediaType: 'movie', providerId: '290272' })).resolves.toBe(true);
+    await repository.markMovieWatched(movie, true);
+    await expect(repository.isMovieWatched({ provider: 'tvdb', mediaType: 'movie', providerId: '290272' })).resolves.toBe(true);
+    await repository.startTrackingSeries(series);
+    await repository.setEpisodeWatched(series, season, episode, true);
+    await expect(repository.getWatchedEpisodeIds({ provider: 'tvdb', mediaType: 'series', providerId: '81189' }, 1)).resolves.toEqual(['111']);
+    expect((await repository.getWatchlist()).map((entry) => entry.media.id)).toContain('tvdb:movie:290272');
+  });
 });
+
+

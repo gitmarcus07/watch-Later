@@ -35,9 +35,3 @@ export const useNotificationStore = create<NotificationStore>((set) => ({
     finally { set({ hasHydrated: true }); }
   },
 }));
-
-/**
- * Local notification delivery is not wired in this build (no push service or
- * scheduler backend). Preferences persist locally and apply once delivery lands.
- */
-export const notificationsAvailable = false;

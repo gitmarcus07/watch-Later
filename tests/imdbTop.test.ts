@@ -1,0 +1,56 @@
+import { formatCompactCount } from '@/lib/format';
+import { mapImdbRow } from '@/data/remote/supabase/imdbRatings';
+
+describe('IMDb display helpers', () => {
+  it('compacts vote counts', () => {
+    expect(formatCompactCount(999)).toBe('999');
+    expect(formatCompactCount(0)).toBe('0');
+    expect(formatCompactCount(1500)).toBe('2K');
+    expect(formatCompactCount(345678)).toBe('346K');
+    expect(formatCompactCount(1234567)).toBe('1.2M');
+    expect(formatCompactCount(2000000)).toBe('2M');
+  });
+
+  it('rejects missing or invalid counts', () => {
+    expect(formatCompactCount(null)).toBeNull();
+    expect(formatCompactCount(undefined)).toBeNull();
+    expect(formatCompactCount(Number.NaN)).toBeNull();
+    expect(formatCompactCount(-5)).toBeNull();
+  });
+});
+
+describe('IMDb snapshot row mapping', () => {
+  const row = {
+    tmdb_id: 278,
+    media_type: 'movie',
+    imdb_id: 'tt0111161',
+    title: 'The Shawshank Redemption',
+    year: 1994,
+    poster_url: 'https://image.tmdb.org/t/p/w342/q6y0Go1tsGEsmtFryDOJo3dEmqu.jpg',
+    rating: 9.3,
+    votes: 2800000,
+    list_rank: 1,
+  };
+
+  it('maps a valid snapshot row', () => {
+    expect(mapImdbRow(row)).toEqual({
+      rank: 1,
+      tmdbId: 278,
+      mediaType: 'movie',
+      imdbId: 'tt0111161',
+      title: 'The Shawshank Redemption',
+      year: 1994,
+      posterUrl: 'https://image.tmdb.org/t/p/w342/q6y0Go1tsGEsmtFryDOJo3dEmqu.jpg',
+      rating: 9.3,
+      votes: 2800000,
+    });
+  });
+
+  it('rejects malformed rows instead of showing broken ranks', () => {
+    expect(mapImdbRow({ ...row, list_rank: 0 })).toBeNull();
+    expect(mapImdbRow({ ...row, rating: Number.NaN })).toBeNull();
+    expect(mapImdbRow({ ...row, title: '' })).toBeNull();
+    expect(mapImdbRow({ ...row, media_type: 'anime' })).toBeNull();
+    expect(mapImdbRow({ ...row, year: null, poster_url: null })).toMatchObject({ year: undefined, posterUrl: undefined });
+  });
+});

@@ -38,7 +38,13 @@ Expo client variables use the `EXPO_PUBLIC_` prefix and are embedded in the app 
 
 ## Navigation
 
-The route tree has welcome, login, and create-account paths plus five bottom tabs: Home, Search, Watchlist, Watched, and More. Route names are URL/deep-link friendly; modal presentation is used for auth placeholders. Expo Router handles native back behavior and preserves tab stacks.
+The route tree has welcome, login, and create-account paths plus five bottom tabs: Home, Upcoming, Watchlist, Watched, and More. Search lives one tap away in the home top bar, next to the browse shortcut. Route names are URL/deep-link friendly; modal presentation is used for auth placeholders. Expo Router handles native back behavior and preserves tab stacks.
+
+## India OTT release tracker
+
+Verified OTT announcements live in Supabase `public.ott_releases` (see `supabase/migrations/202610100001_ott_releases.sql`): public read for anon + authenticated, no client write policies — only the service-role key (dashboard table editor or admin edge function) may write. The Expo app never holds the service-role key. SQLite migration v16 mirrors the table as an offline cache (`ott_releases`) plus local notify-me prefs (`ott_notify_prefs`).
+
+Domain contracts sit in `src/domain/models/ottRelease.ts` (`OttReleaseRecord`: provider-qualified movie id, platform, `country` defaulting to `IN`, precision-aware `ottReleaseDate`, `confirmed | expected | window_announced | platform_announced | unannounced | released` status, source URL, verification timestamps) with validation and precision-aware labels in `src/features/ott/`. `OttReleaseService` merges verified records (remote-first, SQLite fallback) with live TMDB `IN` availability via `getWatchProvidersForRegion` — current streaming only, never presented as a future premiere, and never inferred from theatrical dates. UI: `OttReleaseSection` on the media details screen and the `Upcoming on OTT` screen (`app/ott-upcoming.tsx`, linked from More → Discover and the Upcoming tab). Notify-me persists per-record prefs in SQLite and schedules one local notification per exact future date through `expo-notifications`; month/year windows never schedule. `refreshOttReminders()` re-registers alerts on foreground (granted-permission only, 15-min cooldown) so postponed dates self-correct; Settings → Notifications has a 10-second test alert. Release administration is `app/ott-admin.tsx` (More → OTT release admin): device-local PIN gate plus per-session service-role key (never stored) writing through `ottAdminApi`; validation is shared with the domain gate. Additional countries reuse the same record shape with a different `country` code.
 
 ## Design system
 
