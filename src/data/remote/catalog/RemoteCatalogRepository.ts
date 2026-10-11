@@ -805,53 +805,70 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
   }
 
   /**
-   * Upcoming years are fetched whole (current + next year) on page one;
-   * later pages are empty by design. Unreleased-only, oldest first.
+   * Upcoming movies: TMDB theatrical slates for the US and India merged and
+   * deduped, so Hollywood and Bollywood share one oldest-first list. The
+   * device region joins in when it is neither.
    */
-  private async tvdbUpcomingPage(
-    kind: 'movies' | 'series' | 'anime',
-    page: number,
-    signal?: AbortSignal,
-  ): Promise<PagedCatalog> {
+  async getUpcomingMoviesPage(page: number, region?: string, signal?: AbortSignal): Promise<PagedCatalog> {
     const safePage = Math.max(1, Math.floor(page) || 1);
-    if (safePage > 1) return { items: [], page: safePage, totalPages: 1 };
-    const year = new Date().getFullYear();
-    const load = (targetYear: number) => {
-      if (kind === 'movies') return tvdbClient.filterMovies({ page: 0, year: targetYear }, signal).then((response) => (response.data ?? []).map(mapTvdbFilterMovie));
-      if (kind === 'anime') return tvdbClient.filterSeries({ page: 0, year: targetYear, genre: TVDB_ANIME_GENRE_ID }, signal).then((response) => (response.data ?? []).map((item) => mapTvdbFilterSeries(item, 'anime')));
-      return tvdbClient.filterSeries({ page: 0, year: targetYear }, signal).then((response) => (response.data ?? []).map((item) => mapTvdbFilterSeries(item)));
-    };
-    const settled = await Promise.allSettled([load(year), load(year + 1)]);
+    const regions = ['US', 'IN', ...(region && region !== 'US' && region !== 'IN' ? [region] : [])];
+    const settled = await Promise.allSettled(
+      regions.map((code) => tmdbClient.upcomingMovies(safePage, code, signal)),
+    );
     const fulfilled = settled.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
     if (!fulfilled.length) {
       const reason = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected')?.reason;
       if (reason instanceof Error) throw reason;
-      throw new CatalogError('tvdb', 'network');
+      throw new CatalogError('tmdb', 'network');
     }
     const seen = new Set<string>();
     const items = fulfilled
-      .flat()
-      .filter((item): item is CatalogMedia => {
-        if (!item || seen.has(item.id)) return false;
+      .flatMap((response) => response.results ?? [])
+      .map(mapTmdbMovie)
+      .filter((item) => {
+        if (seen.has(item.id)) return false;
         seen.add(item.id);
         return isUpcomingMedia(item);
       })
       .sort((a, b) => (a.releaseDate ?? '9999').localeCompare(b.releaseDate ?? '9999'));
-    return { items, page: safePage, totalPages: 1 };
+    return {
+      items,
+      page: safePage,
+      totalPages: RemoteCatalogRepository.maxPages(Math.max(...fulfilled.map((response) => response.total_pages ?? 1))),
+    };
   }
 
-  async getUpcomingMoviesPage(page: number, region?: string, signal?: AbortSignal): Promise<PagedCatalog> {
-    void region;
-    return this.tvdbUpcomingPage('movies', page, signal);
-  }
-
+  /**
+   * Upcoming series: TMDB titles starting today or later, worldwide —
+   * Hollywood and Bollywood premieres in one oldest-first list.
+   */
   async getUpcomingSeriesPage(page: number, region?: string, signal?: AbortSignal): Promise<PagedCatalog> {
-    void region;
-    return this.tvdbUpcomingPage('series', page, signal);
+    const safePage = Math.max(1, Math.floor(page) || 1);
+    const response = await tmdbClient.upcomingTvSeries(safePage, region, signal);
+    const items = (response.results ?? [])
+      .map(mapTmdbTv)
+      .filter((item) => isUpcomingMedia(item))
+      .sort((a, b) => (a.releaseDate ?? '9999').localeCompare(b.releaseDate ?? '9999'));
+    return {
+      items,
+      page: safePage,
+      totalPages: RemoteCatalogRepository.maxPages(response.total_pages),
+    };
   }
 
+  /** Upcoming anime: AniList's unreleased titles, English names included. */
   async getUpcomingAnimePage(page: number, signal?: AbortSignal): Promise<PagedCatalog> {
-    return this.tvdbUpcomingPage('anime', page, signal);
+    const safePage = Math.max(1, Math.floor(page) || 1);
+    const response = await anilistClient.upcomingAnimePage(safePage, 20, signal);
+    const items = response.media
+      .map(mapAniListAnime)
+      .filter((item) => isUpcomingMedia(item))
+      .sort((a, b) => (a.releaseDate ?? '9999').localeCompare(b.releaseDate ?? '9999'));
+    return {
+      items,
+      page: safePage,
+      totalPages: response.lastPage ?? (response.hasNextPage ? safePage + 1 : safePage),
+    };
   }
 }
 

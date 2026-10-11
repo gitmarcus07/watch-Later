@@ -61,7 +61,7 @@ export default function UpcomingScreen() {
   };
 
   return <Screen>
-    <FadeInView><View style={styles.header}><View style={styles.title}><AppText variant="heading1">Upcoming</AppText><AppText variant="bodySmall" muted>Every future release — oldest first</AppText></View></View></FadeInView>
+    <FadeInView><View style={styles.header}><View style={styles.title}><AppText variant="heading1">Upcoming</AppText></View></View></FadeInView>
     <View style={styles.filters}>{FILTERS.map((option) => {
       const selected = option.value === filter;
       return <Pressable key={option.value} accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={`Show upcoming ${option.label}`} onPress={() => { if (!selected) triggerLightHaptic(); setFilter(option.value); }} style={[styles.filter, selected && styles.filterActive]}><AppText variant="label" style={selected ? styles.filterTextActive : styles.filterText}>{option.label}</AppText></Pressable>;

@@ -180,14 +180,28 @@ describe('discovery repository', () => {
     expect([...dates].sort()).toEqual(dates);
   });
 
-  it('pages upcoming years in one shot with honest single-page totals', async () => {
-    jest.spyOn(tvdbClient, 'filterMovies').mockResolvedValue({ data: [tvdbMovie(40, 'Future Film', '2099', 10, 'Announced')], links: tvdbLinks(1) } as never);
-    jest.spyOn(tvdbClient, 'filterSeries').mockResolvedValue({ data: [tvdbSeries(41, 'Future Show', '2099-01-05', '2099', 30, 'Continuing')], links: tvdbLinks(1) } as never);
+  it('pages upcoming feeds with real provider totals', async () => {
+    jest.spyOn(tmdbClient, 'upcomingMovies').mockImplementation(async (page, region) => ({
+      results: region === 'IN' ? [movieDto(40, 'Future Hindi Film', '2099-02-01')] : [movieDto(41, 'Future Hollywood Film', '2099-01-05')],
+      page,
+      total_pages: 4,
+    }));
+    jest.spyOn(tmdbClient, 'upcomingTvSeries').mockResolvedValue({
+      results: [tvDto(42, 'Future Show', '2099-04-01')],
+      page: 1,
+      total_pages: 2,
+    });
+    jest.spyOn(anilistClient, 'upcomingAnimePage').mockResolvedValue({
+      media: [{ id: 43, title: { english: 'Future Anime' }, startDate: { year: 2099, month: 7, day: 1 }, format: 'TV', status: 'NOT_YET_RELEASED' }],
+      hasNextPage: false,
+      lastPage: 1,
+    } as never);
     const repo = new RemoteCatalogRepository();
-    await expect(repo.getUpcomingMoviesPage(1)).resolves.toMatchObject({ page: 1, totalPages: 1, items: [{ id: 'tvdb:movie:40' }] });
-    await expect(repo.getUpcomingSeriesPage(1)).resolves.toMatchObject({ page: 1, totalPages: 1, items: [{ id: 'tvdb:series:41' }] });
-    await expect(repo.getUpcomingAnimePage(1)).resolves.toMatchObject({ page: 1, totalPages: 1 });
-    await expect(repo.getUpcomingMoviesPage(2)).resolves.toMatchObject({ page: 2, items: [] });
+    // Hollywood + Bollywood theatrical merged, oldest first.
+    await expect(repo.getUpcomingMoviesPage(1)).resolves.toMatchObject({ page: 1, totalPages: 4, items: [{ id: 'tmdb:movie:41' }, { id: 'tmdb:movie:40' }] });
+    await expect(repo.getUpcomingSeriesPage(1)).resolves.toMatchObject({ page: 1, totalPages: 2, items: [{ id: 'tmdb:series:42' }] });
+    await expect(repo.getUpcomingAnimePage(1)).resolves.toMatchObject({ page: 1, totalPages: 1, items: [{ id: 'anilist:anime:43' }] });
+    await expect(repo.getUpcomingMoviesPage(2)).resolves.toMatchObject({ page: 2, items: [{ id: 'tmdb:movie:41' }, { id: 'tmdb:movie:40' }] });
   });
 
   it('pages trending-all and bollywood feeds with capped totals', async () => {
