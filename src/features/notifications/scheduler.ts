@@ -222,10 +222,10 @@ export function __resetReminderSchedulerForTests(): void {
   activeRefresh = undefined;
 }
 
-/** Call once at startup so foreground notifications display as banners. */
+/** Call once at startup so foreground notifications display as banners with the brand chime. */
 export function setupNotificationHandler(): void {
   Notifications.setNotificationHandler({
-    handleNotification: async () => ({ shouldPlaySound: false, shouldSetBadge: false, shouldShowBanner: true, shouldShowList: true }),
+    handleNotification: async () => ({ shouldPlaySound: true, shouldSetBadge: false, shouldShowBanner: true, shouldShowList: true }),
   });
 }
 
