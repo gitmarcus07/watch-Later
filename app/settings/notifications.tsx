@@ -9,7 +9,9 @@ import { IconButton } from '@/components/buttons/IconButton';
 import { AppButton } from '@/components/buttons/AppButton';
 import { useNotificationStore } from '@/store/app/notificationStore';
 import { getReminderPermission, refreshReminders } from '@/features/notifications/scheduler';
+import { RELEASE_DAY_BODY, releaseDayTitle } from '@/features/notifications/upcomingReminders';
 import { sendTestNotification } from '@/features/ott/ottReminders';
+import { watchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
 import { showDialog, showToast } from '@/components/feedback/AppDialog';
 import { colors, radius, spacing } from '@/theme';
 
@@ -46,11 +48,21 @@ export default function NotificationsScreen() {
       label="Send test notification"
       variant="secondary"
       onPress={() => {
-        void sendTestNotification().then((result) => {
-          if (result === 'scheduled') showToast('Test arrives in ~10 seconds', 'success');
+        // Preview the real release-day format (first interested title, else
+        // the spec sample) instead of diagnostic copy.
+        const preview = watchStateRepository.getInterested()
+          .then((entries) => {
+            const first = entries[0]?.media;
+            return first
+              ? { title: releaseDayTitle(first.title), body: RELEASE_DAY_BODY }
+              : { title: releaseDayTitle('Dune: Part Three'), body: RELEASE_DAY_BODY };
+          })
+          .catch(() => ({ title: releaseDayTitle('Dune: Part Three'), body: RELEASE_DAY_BODY }));
+        void preview.then((custom) => sendTestNotification(custom).then((result) => {
+          if (result === 'scheduled') showToast('Release preview arrives in ~10 seconds', 'success');
           else if (result === 'denied') void showDialog({ type: 'warning', title: 'Notifications are blocked', message: 'Allow notifications in system settings, then try again.' });
           else void showDialog({ type: 'error', title: 'Couldn’t schedule the test', message: 'Please try again.' });
-        });
+        }));
       }}
     />
   </Screen>;

@@ -37,6 +37,8 @@ export function upcomingReminderDate(releaseDate: string | undefined, now: Date 
 }
 
 /** Branded release-day alert: app color + custom chime, opens the title. */
+export const RELEASE_DAY_BODY = 'It’s on your Watch Later list — tap to view it.';
+
 export function upcomingNotificationContent(media: Pick<CatalogMedia, 'id' | 'title' | 'mediaType'>): {
   title: string;
   body: string;
@@ -48,7 +50,7 @@ export function upcomingNotificationContent(media: Pick<CatalogMedia, 'id' | 'ti
     title: releaseDayTitle(media.title),
     // Our lists are called Watch Later / Watchlist (there is no ASAP list),
     // so the body names the real list and the tap action.
-    body: 'It’s on your Watch Later list — tap to view it.',
+    body: RELEASE_DAY_BODY,
     data: { route: '/media/[id]', mediaId: media.id },
     color: OTT_NOTIFICATION_COLOR,
     sound: OTT_NOTIFICATION_SOUND,
