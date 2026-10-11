@@ -40,6 +40,8 @@ export interface CatalogRepository {
   getPopularSeriesPage(page: number, region?: string, signal?: AbortSignal): Promise<PagedCatalog>;
   /** Paged Hindi movies + shows (Bollywood), most popular first. */
   getBollywoodPage(page: number, signal?: AbortSignal): Promise<PagedCatalog>;
+  /** Paged English-language movies + shows (Hollywood), most popular first. */
+  getHollywoodPage(page: number, signal?: AbortSignal): Promise<PagedCatalog>;
   /** Paged popular anime, most popular first. */
   getPopularAnimePage(page: number, signal?: AbortSignal): Promise<PagedCatalog>;
   /** Paged upcoming movies (TMDb), oldest release date first. */

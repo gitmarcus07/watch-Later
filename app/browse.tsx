@@ -9,19 +9,20 @@ import { EmptyState, ErrorView, PosterSkeleton } from '@/components/feedback/Fee
 import { PosterCard } from '@/components/media/PosterCard';
 import type { CatalogMedia } from '@/domain/models/media';
 import { CatalogError } from '@/domain/errors/CatalogError';
-import { useBollywoodPages, usePopularAnimePages, usePopularMoviesPages, usePopularSeriesPages, useTrendingAllPages } from '@/features/catalog/hooks';
+import { useBollywoodPages, useHollywoodPages, usePopularAnimePages, usePopularMoviesPages, usePopularSeriesPages, useTrendingAllPages } from '@/features/catalog/hooks';
 import { mediaRouteId } from '@/features/catalog/mediaIdentity';
 import { isUpcoming } from '@/features/catalog/upcoming';
 import { triggerLightHaptic } from '@/lib/haptics';
 import { colors, radius, spacing } from '@/theme';
 
-type BrowseTab = 'trending' | 'movies' | 'shows' | 'anime' | 'bollywood';
+type BrowseTab = 'trending' | 'movies' | 'shows' | 'anime' | 'bollywood' | 'hollywood';
 const TABS: { label: string; value: BrowseTab; hint: string }[] = [
   { label: 'Trending', value: 'trending', hint: 'Show trending titles' },
   { label: 'Movies', value: 'movies', hint: 'Show popular movies' },
   { label: 'Shows', value: 'shows', hint: 'Show popular series' },
   { label: 'Anime', value: 'anime', hint: 'Show popular anime' },
-  { label: 'Bollywood', value: 'bollywood', hint: 'Show Hindi movies and shows' },
+  { label: 'Bollywood', value: 'bollywood', hint: 'Show Hindi movies and OTT shows' },
+  { label: 'Hollywood', value: 'hollywood', hint: 'Show English movies and shows' },
 ];
 
 function useTabQuery(tab: BrowseTab) {
@@ -30,11 +31,13 @@ function useTabQuery(tab: BrowseTab) {
   const shows = usePopularSeriesPages(tab === 'shows');
   const anime = usePopularAnimePages(tab === 'anime');
   const bollywood = useBollywoodPages(tab === 'bollywood');
+  const hollywood = useHollywoodPages(tab === 'hollywood');
   switch (tab) {
     case 'movies': return movies;
     case 'shows': return shows;
     case 'anime': return anime;
     case 'bollywood': return bollywood;
+    case 'hollywood': return hollywood;
     case 'trending':
     default: return trending;
   }

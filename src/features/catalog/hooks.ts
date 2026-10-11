@@ -184,21 +184,25 @@ function useInfiniteCatalog(key: readonly string[], fetchPage: (page: number, si
 }
 
 export function useTrendingAllPages(enabled = true) {
-  return useInfiniteCatalog(['catalog', 'browse', 'trending'], (page, signal) => catalogRepository.getTrendingAllPage(page, signal), enabled);
+  return useInfiniteCatalog(['catalog', 'browse', 'trending', 'tmdb'], (page, signal) => catalogRepository.getTrendingAllPage(page, signal), enabled);
 }
 
 export function usePopularMoviesPages(enabled = true) {
   const region = deviceRegion();
-  return useInfiniteCatalog(['catalog', 'browse', 'movies', region], (page, signal) => catalogRepository.getPopularMoviesPage(page, region, signal), enabled);
+  return useInfiniteCatalog(['catalog', 'browse', 'movies', region, 'tmdb'], (page, signal) => catalogRepository.getPopularMoviesPage(page, region, signal), enabled);
 }
 
 export function usePopularSeriesPages(enabled = true) {
   const region = deviceRegion();
-  return useInfiniteCatalog(['catalog', 'browse', 'shows', region], (page, signal) => catalogRepository.getPopularSeriesPage(page, region, signal), enabled);
+  return useInfiniteCatalog(['catalog', 'browse', 'shows', region, 'tmdb'], (page, signal) => catalogRepository.getPopularSeriesPage(page, region, signal), enabled);
 }
 
 export function useBollywoodPages(enabled = true) {
-  return useInfiniteCatalog(['catalog', 'browse', 'bollywood'], (page, signal) => catalogRepository.getBollywoodPage(page, signal), enabled);
+  return useInfiniteCatalog(['catalog', 'browse', 'bollywood', 'tmdb'], (page, signal) => catalogRepository.getBollywoodPage(page, signal), enabled);
+}
+
+export function useHollywoodPages(enabled = true) {
+  return useInfiniteCatalog(['catalog', 'browse', 'hollywood'], (page, signal) => catalogRepository.getHollywoodPage(page, signal), enabled);
 }
 
 export function usePopularAnimePages(enabled = true) {

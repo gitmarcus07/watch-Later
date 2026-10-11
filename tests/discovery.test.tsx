@@ -208,14 +208,41 @@ describe('discovery repository', () => {
     const discoverMovies = jest.spyOn(tmdbClient, 'discoverMovies').mockResolvedValue({
       results: [movieDto(40, 'Hindi Film', '2026-01-01')], total_pages: 12,
     });
-    jest.spyOn(tmdbClient, 'discoverTv').mockResolvedValue({
+    const discoverTv = jest.spyOn(tmdbClient, 'discoverTv').mockResolvedValue({
       results: [tvDto(41, 'Hindi Show', '2026-03-01')], total_pages: 8,
     });
     const bollywood = await new RemoteCatalogRepository().getBollywoodPage(1);
-    // Hindi originals only — Hollywood and anime cannot leak in.
+    // Hindi originals only — Hollywood and anime cannot leak in; series are
+    // restricted to Indian OTT premieres with real traction (no TV soaps).
     expect(discoverMovies).toHaveBeenCalledWith(1, { language: 'hi' }, undefined);
+    expect(discoverTv).toHaveBeenCalledWith(1, {
+      language: 'hi', watchRegion: 'IN', watchProviders: '8|119|122', voteCountGte: 40,
+    }, undefined);
     expect(bollywood.items.map((item) => item.id).sort()).toEqual(['tmdb:movie:40', 'tmdb:series:41'].sort());
     expect(bollywood.totalPages).toBe(12);
+  });
+
+  it('serves movies, shows, and hollywood shelves from TMDB popularity', async () => {
+    jest.spyOn(tmdbClient, 'popularMovies').mockResolvedValue({
+      results: [movieDto(50, 'Global Hit', '2026-01-01')], total_pages: 400,
+    });
+    jest.spyOn(tmdbClient, 'popularTv').mockResolvedValue({
+      results: [tvDto(51, 'Global Show', '2026-02-01')], total_pages: 300,
+    });
+    const movies = await new RemoteCatalogRepository().getPopularMoviesPage(1);
+    expect(movies.items.map((item) => item.id)).toEqual(['tmdb:movie:50']);
+    expect(movies.totalPages).toBe(20);
+    const shows = await new RemoteCatalogRepository().getPopularSeriesPage(1);
+    expect(shows.items.map((item) => item.id)).toEqual(['tmdb:series:51']);
+
+    jest.spyOn(tmdbClient, 'discoverMovies').mockResolvedValue({
+      results: [movieDto(60, 'Hollywood Film', '2026-01-01')], total_pages: 100,
+    });
+    jest.spyOn(tmdbClient, 'discoverTv').mockResolvedValue({
+      results: [tvDto(61, 'Hollywood Show', '2026-02-01')], total_pages: 90,
+    });
+    const hollywood = await new RemoteCatalogRepository().getHollywoodPage(1);
+    expect(hollywood.items.map((item) => item.id)).toEqual(['tmdb:movie:60', 'tmdb:series:61']);
   });
 
   it('resolves directors and age ratings from TMDb with regional fallback', async () => {

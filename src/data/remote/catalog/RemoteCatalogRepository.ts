@@ -696,35 +696,59 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
 
   async getPopularMoviesPage(page: number, region?: string, signal?: AbortSignal): Promise<PagedCatalog> {
     const safePage = Math.max(1, Math.floor(page) || 1);
-    void region;
-    const response = await tvdbClient.filterMovies({ page: safePage - 1 }, signal);
-    const size = RemoteCatalogRepository.TVDB_PAGE_SIZE;
+    // TMDB popular mixes Hollywood, Bollywood, and everything else by
+    // worldwide popularity — exactly the Movies shelf.
+    const response = await tmdbClient.popularMovies(safePage, region, signal);
+    const size = 20;
     return {
-      items: (response.data ?? []).slice(0, size).map(mapTvdbFilterMovie).filter((item): item is CatalogMedia => item !== null),
+      items: (response.results ?? []).slice(0, size).map(mapTmdbMovie),
       page: safePage,
-      totalPages: RemoteCatalogRepository.maxPages(RemoteCatalogRepository.tvdbTotalPages(response.links?.total_items, response.links?.page_size)),
+      totalPages: RemoteCatalogRepository.maxPages(response.total_pages),
     };
   }
 
   async getPopularSeriesPage(page: number, region?: string, signal?: AbortSignal): Promise<PagedCatalog> {
     const safePage = Math.max(1, Math.floor(page) || 1);
-    void region;
-    const response = await tvdbClient.filterSeries({ page: safePage - 1 }, signal);
-    const size = RemoteCatalogRepository.TVDB_PAGE_SIZE;
+    const response = await tmdbClient.popularTv(safePage, region, signal);
+    const size = 20;
     return {
-      items: (response.data ?? []).slice(0, size).map((item) => mapTvdbFilterSeries(item)).filter((item): item is CatalogMedia => item !== null),
+      items: (response.results ?? []).slice(0, size).map(mapTmdbTv),
       page: safePage,
-      totalPages: RemoteCatalogRepository.maxPages(RemoteCatalogRepository.tvdbTotalPages(response.links?.total_items, response.links?.page_size)),
+      totalPages: RemoteCatalogRepository.maxPages(response.total_pages),
+    };
+  }
+
+  async getHollywoodPage(page: number, signal?: AbortSignal): Promise<PagedCatalog> {
+    const safePage = Math.max(1, Math.floor(page) || 1);
+    // English originals only: Hollywood movies and shows, mixed.
+    const [movies, series] = await Promise.all([
+      tmdbClient.discoverMovies(safePage, { language: 'en' }, signal),
+      tmdbClient.discoverTv(safePage, { language: 'en' }, signal),
+    ]);
+    const size = 20;
+    return {
+      items: interleaveRanked([
+        (movies.results ?? []).slice(0, size).map(mapTmdbMovie),
+        (series.results ?? []).slice(0, size).map(mapTmdbTv),
+      ], size * 2),
+      page: safePage,
+      totalPages: RemoteCatalogRepository.maxPages(Math.max(movies.total_pages ?? 1, series.total_pages ?? 1)),
     };
   }
 
   async getBollywoodPage(page: number, signal?: AbortSignal): Promise<PagedCatalog> {
     const safePage = Math.max(1, Math.floor(page) || 1);
-    // Hindi originals only: TVDB's language/country filters leak Hollywood
-    // and anime in, while TMDB's original-language filter is exact.
+    // Hindi originals, movies and shows mixed. Series are additionally
+    // restricted to Indian OTT premieres with real audience traction, which
+    // is what keeps daily TV soaps out of the shelf.
     const [movies, series] = await Promise.all([
       tmdbClient.discoverMovies(safePage, { language: 'hi' }, signal),
-      tmdbClient.discoverTv(safePage, { language: 'hi' }, signal),
+      tmdbClient.discoverTv(safePage, {
+        language: 'hi',
+        watchRegion: 'IN',
+        watchProviders: '8|119|122',
+        voteCountGte: 40,
+      }, signal),
     ]);
     const size = 20;
     return {
