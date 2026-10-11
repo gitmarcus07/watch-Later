@@ -4,6 +4,7 @@ import type { PagedCatalog } from '@/domain/repositories/CatalogRepository';
 import { catalogRepository } from '@/data/remote/catalog/RemoteCatalogRepository';
 import { deviceRegion } from '@/data/remote/catalog/region';
 import { fetchImdbTop } from '@/data/remote/supabase/imdbRatings';
+import { fetchImdbRatingsFor, type ImdbRating } from '@/data/remote/supabase/imdbRatings';
 
 export function useCatalogSearch(query: string, filter: CatalogFilter, enabled: boolean) {
   const normalized = query.trim();
@@ -227,6 +228,19 @@ export function useImdbTop(media: 'movie' | 'series', enabled = true) {
     queryFn: () => fetchImdbTop(media),
     enabled,
     // Weekly snapshot: a day of staleness keeps repeat visits free.
+    staleTime: 24 * 60 * 60_000,
+    gcTime: 7 * 24 * 60 * 60_000,
+    retry: 1,
+  });
+}
+
+/** IMDb scores for visible titles, keyed `mediaType:tmdbId`. Decoration only — never blocks lists. */
+export function useImdbRatingsFor(items: { tmdbId: number; mediaType: 'movie' | 'series' }[], enabled = true) {
+  const key = items.map((item) => `${item.mediaType}:${item.tmdbId}`).sort().join(',');
+  return useQuery({
+    queryKey: ['catalog', 'imdb-ratings', key] as const,
+    queryFn: (): Promise<Map<string, ImdbRating>> => fetchImdbRatingsFor(items),
+    enabled: enabled && items.length > 0,
     staleTime: 24 * 60 * 60_000,
     gcTime: 7 * 24 * 60 * 60_000,
     retry: 1,

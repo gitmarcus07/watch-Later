@@ -31,6 +31,8 @@ MIN_VOTES = 25000
 CANDIDATES = 600
 TOP_N = 250
 MIN_ITEMS = 150
+RECENT_MIN_VOTES = 1000
+RECENT_CAP = 1200
 TMDB_SLEEP_SECONDS = 0.3
 TMDB_MAX_ATTEMPTS = 5
 
@@ -145,7 +147,7 @@ def tmdb_find(tconst: str, kind: str):
     return None
 
 
-def resolve(cands: list, kind: str) -> list:
+def resolve(cands: list, kind: str, top_n: int = TOP_N, ranked: bool = True) -> list:
     resolved = []
     for cand in cands:
         match = tmdb_find(cand["tconst"], kind)
@@ -172,10 +174,10 @@ def resolve(cands: list, kind: str) -> list:
                 "votes": cand["votes"],
             }
         )
-        if len(resolved) >= TOP_N:
+        if len(resolved) >= top_n:
             break
     for index, row in enumerate(resolved):
-        row["list_rank"] = index + 1
+        row["list_rank"] = index + 1 if ranked else None
         row["updated_at"] = RUN_STARTED_AT
     print(f"resolved {kind}: {len(resolved)}")
     return resolved
@@ -194,19 +196,51 @@ def rest(path: str, method="GET", payload=None):
     return status, body
 
 
-def publish(rows: list, kind: str) -> None:
+def publish(rows: list, kind: str, cleanup: bool = True) -> None:
     for start in range(0, len(rows), 200):
         chunk = rows[start : start + 200]
         status, body = rest("imdb_ratings?on_conflict=tmdb_id,media_type", method="POST", payload=chunk)
         if status not in (200, 201):
             print(f"upsert failed ({kind}): http {status} {body[:200]!r}", file=sys.stderr)
             sys.exit(1)
+    if not cleanup:
+        return
+    cleanup_stale(kind)
+
+
+def cleanup_stale(kind: str) -> None:
     status, body = rest(
         f"imdb_ratings?media_type=eq.{kind}&updated_at=lt.{RUN_STARTED_AT}", method="DELETE"
     )
     if status not in (200, 204):
         print(f"stale cleanup failed ({kind}): http {status} {body[:200]!r}", file=sys.stderr)
         sys.exit(1)
+
+
+def recent_candidates(blob: bytes, ratings: dict, kinds: set, years: set, cap: int) -> list:
+    """Recent releases with meaningful vote counts, most-voted first."""
+    scored = []
+    for index, line in enumerate(gunzip_lines(blob)):
+        if index == 0:
+            continue
+        parts = line.split("\t")
+        if len(parts) != 9:
+            continue
+        tconst, title_type, primary, _original, adult, year, _end, _runtime, _genres = parts
+        if title_type not in kinds or adult != "0" or year not in years:
+            continue
+        if tconst not in ratings:
+            continue
+        rating, votes = ratings[tconst]
+        if votes < RECENT_MIN_VOTES:
+            continue
+        scored.append((votes, tconst, primary, year, rating))
+    scored.sort(key=lambda row: -row[0])
+    print(f"recent {sorted(kinds)[0]}-like candidates: {len(scored)}")
+    return [
+        {"tconst": tconst, "primary": primary, "year": year, "rating": rating, "votes": votes}
+        for votes, tconst, primary, year, rating in scored[:cap]
+    ]
 
 
 def main() -> None:
@@ -220,9 +254,33 @@ def main() -> None:
     if len(movies) < MIN_ITEMS or len(series) < MIN_ITEMS:
         print(f"refusing to publish partial lists: movies={len(movies)} series={len(series)}", file=sys.stderr)
         sys.exit(1)
-    publish(movies, "movie")
-    publish(series, "series")
-    print(f"published movies={len(movies)} series={len(series)}")
+    publish(movies, "movie", cleanup=False)
+    publish(series, "series", cleanup=False)
+    # Recent releases carry IMDb scores for fresh titles (the Top 250 rarely
+    # covers them). Unranked rows (list_rank null); top-list ranks above win
+    # on overlap.
+    current_year = time.gmtime().tm_year
+    recent_years = {str(current_year), str(current_year - 1)}
+    top_tconsts = {row["imdb_id"] for row in movies + series}
+    recent_movies = resolve(
+        [cand for cand in recent_candidates(basics, ratings, {"movie"}, recent_years, RECENT_CAP) if cand["tconst"] not in top_tconsts],
+        "movie",
+        top_n=RECENT_CAP,
+        ranked=False,
+    )
+    recent_series = resolve(
+        [cand for cand in recent_candidates(basics, ratings, {"tvSeries", "tvMiniSeries"}, recent_years, RECENT_CAP) if cand["tconst"] not in top_tconsts],
+        "series",
+        top_n=RECENT_CAP,
+        ranked=False,
+    )
+    if len(recent_movies) < 50 or len(recent_series) < 50:
+        print(f"warning: thin recent coverage movies={len(recent_movies)} series={len(recent_series)}", file=sys.stderr)
+    publish(recent_movies, "movie", cleanup=False)
+    publish(recent_series, "series", cleanup=False)
+    cleanup_stale("movie")
+    cleanup_stale("series")
+    print(f"published movies={len(movies)}+{len(recent_movies)} series={len(series)}+{len(recent_series)}")
 
 
 if __name__ == "__main__":

@@ -1,5 +1,5 @@
 import { formatCompactCount } from '@/lib/format';
-import { mapImdbRow } from '@/data/remote/supabase/imdbRatings';
+import { mapImdbRating, mapImdbRow } from '@/data/remote/supabase/imdbRatings';
 
 describe('IMDb display helpers', () => {
   it('compacts vote counts', () => {
@@ -48,9 +48,16 @@ describe('IMDb snapshot row mapping', () => {
 
   it('rejects malformed rows instead of showing broken ranks', () => {
     expect(mapImdbRow({ ...row, list_rank: 0 })).toBeNull();
+    expect(mapImdbRow({ ...row, list_rank: null })).toBeNull();
     expect(mapImdbRow({ ...row, rating: Number.NaN })).toBeNull();
     expect(mapImdbRow({ ...row, title: '' })).toBeNull();
     expect(mapImdbRow({ ...row, media_type: 'anime' })).toBeNull();
     expect(mapImdbRow({ ...row, year: null, poster_url: null })).toMatchObject({ year: undefined, posterUrl: undefined });
+  });
+
+  it('validates rating-only rows for card decoration', () => {
+    expect(mapImdbRating({ rating: 7.3, votes: 851 })).toEqual({ rating: 7.3, votes: 851 });
+    expect(mapImdbRating({ rating: Number.NaN, votes: 851 })).toBeNull();
+    expect(mapImdbRating({ rating: 7.3, votes: Number.POSITIVE_INFINITY })).toBeNull();
   });
 });

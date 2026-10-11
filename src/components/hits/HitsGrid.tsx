@@ -3,6 +3,8 @@ import { AppText } from '@/components/common/AppText';
 import { EmptyState, ErrorView, PosterSkeleton } from '@/components/feedback/FeedbackViews';
 import { PosterCard } from '@/components/media/PosterCard';
 import type { HitReportItem } from '@/features/hits/types';
+import type { ImdbRating } from '@/data/remote/supabase/imdbRatings';
+import { formatCompactCount } from '@/lib/format';
 import { spacing } from '@/theme';
 
 const MONTHS = ['Jan', 'Feb', 'Mar', 'Apr', 'May', 'Jun', 'Jul', 'Aug', 'Sep', 'Oct', 'Nov', 'Dec'];
@@ -22,8 +24,10 @@ export function hitSubtitle(item: HitReportItem): string {
   return `${formatHitDate(item.releaseDate)} · ${rating}${votes}`;
 }
 
-export function hitMeta(item: HitReportItem): string | undefined {
-  return item.popularity == null ? undefined : `Popularity ${item.popularity.toFixed(1)}`;
+export function hitMeta(item: HitReportItem, imdb?: ImdbRating): string | undefined {
+  const popularity = item.popularity == null ? undefined : `Popularity ${item.popularity.toFixed(1)}`;
+  const imdbText = imdb == null ? undefined : `IMDb ★ ${imdb.rating.toFixed(1)}${formatCompactCount(imdb.votes) ? ` (${formatCompactCount(imdb.votes)})` : ''}`;
+  return [popularity, imdbText].filter(Boolean).join(' · ') || undefined;
 }
 
 interface HitsGridProps {
@@ -33,12 +37,14 @@ interface HitsGridProps {
   emptyTitle: string;
   emptyMessage: string;
   cardWidth: number;
+  /** IMDb scores keyed `mediaType:tmdbId`. Absent scores simply hide. */
+  imdbRatings?: Map<string, ImdbRating>;
   onRetry: () => void;
   onOpen: (item: HitReportItem) => void;
 }
 
 /** Ranked poster grid with loading skeletons, error+retry, and empty states. Pure presentational. */
-export function HitsGrid({ items, loading, loadError, emptyTitle, emptyMessage, cardWidth, onRetry, onOpen }: HitsGridProps) {
+export function HitsGrid({ items, loading, loadError, emptyTitle, emptyMessage, cardWidth, imdbRatings, onRetry, onOpen }: HitsGridProps) {
 
   if (loading && !items.length) {
     return <View accessibilityRole="progressbar" accessibilityLabel="Loading rankings"><FlatList data={[0, 1, 2, 3, 4, 5]} keyExtractor={(item) => String(item)} numColumns={2} columnWrapperStyle={styles.gridRow} contentContainerStyle={styles.grid} style={styles.flat} renderItem={() => <PosterSkeleton />} showsVerticalScrollIndicator={false} /></View>;
@@ -61,7 +67,7 @@ export function HitsGrid({ items, loading, loadError, emptyTitle, emptyMessage, 
       <PosterCard
         title={item.title}
         subtitle={hitSubtitle(item)}
-        meta={hitMeta(item)}
+        meta={hitMeta(item, imdbRatings?.get(`${item.mediaType}:${item.tmdbId}`))}
         badge={`#${item.rank}`}
         posterUri={item.posterPath ?? undefined}
         width={cardWidth}

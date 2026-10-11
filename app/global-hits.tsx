@@ -6,6 +6,7 @@ import { Screen } from '@/components/common/Screen';
 import { IconButton } from '@/components/buttons/IconButton';
 import { HitsFootnote, HitsGrid } from '@/components/hits/HitsGrid';
 import { useGlobalHitsLive, useHitReport, useHitReports } from '@/features/hits/hooks';
+import { useImdbRatingsFor } from '@/features/catalog/hooks';
 import {
   daysUntilPublication,
   isPeriodComplete,
@@ -47,6 +48,7 @@ export default function GlobalHitsScreen() {
   const items: HitReportItem[] = source === 'published'
     ? (media === 'movie' ? reportQuery.data?.movies : reportQuery.data?.series) ?? []
     : liveQuery.data?.items ?? [];
+  const imdbQuery = useImdbRatingsFor(items);
   const loading = source === 'published' ? reportQuery.isLoading : liveQuery.isLoading;
   const loadError = source === 'published' ? reportQuery.isError : liveQuery.isError;
 
@@ -144,6 +146,7 @@ export default function GlobalHitsScreen() {
         loading={loading}
         loadError={loadError}
         cardWidth={cardWidth}
+        imdbRatings={imdbQuery.data}
         emptyTitle={source === 'published' && !reportHasData ? 'No report yet' : 'No eligible releases'}
         emptyMessage={source === 'published' && !reportHasData
           ? `The ${periodLabel(periodType, key)} report has not been published yet. Check the live preview instead.`

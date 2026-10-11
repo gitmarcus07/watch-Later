@@ -1,5 +1,5 @@
 import { act, create, type ReactTestRenderer } from 'react-test-renderer';
-import { HitsGrid, formatHitDate, hitSubtitle } from '@/components/hits/HitsGrid';
+import { HitsGrid, formatHitDate, hitMeta, hitSubtitle } from '@/components/hits/HitsGrid';
 import type { HitReportItem } from '@/features/hits/types';
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
@@ -34,6 +34,9 @@ describe('hits grid states', () => {
     expect(formatHitDate('2026-08-06')).toBe('Aug 6');
     expect(formatHitDate('nope')).toBe('nope');
     expect(hitSubtitle(item({ tmdbId: 1 }))).toBe('Aug 6 · ★ 7.6 (536)');
+    expect(hitMeta(item({ tmdbId: 1 }))).toBe('Popularity 454.9');
+    expect(hitMeta(item({ tmdbId: 1 }), { rating: 7.3, votes: 851 })).toBe('Popularity 454.9 · IMDb ★ 7.3 (851)');
+    expect(hitMeta(item({ tmdbId: 1, popularity: null }), { rating: 7.3, votes: 851 })).toBe('IMDb ★ 7.3 (851)');
   });
 
   it('shows loading skeletons while fetching', () => {
@@ -64,6 +67,7 @@ describe('hits grid states', () => {
       items: [item({ tmdbId: 1, rank: 1 }), item({ tmdbId: 2, rank: 2, title: 'Second' })],
       loading: false,
       loadError: false,
+      imdbRatings: new Map([['movie:1', { rating: 7.3, votes: 851 }]]),
       onOpen,
     });
     const text = textOf(tree);
@@ -72,6 +76,7 @@ describe('hits grid states', () => {
     expect(text).toContain('#1');
     expect(text).toContain('#2');
     expect(text).toContain('Popularity 454.9');
+    expect(text).toContain('IMDb ★ 7.3 (851)');
     tree.root.findAllByProps({ accessibilityRole: 'button' })[0].props.onPress();
     expect(onOpen).toHaveBeenCalledTimes(1);
     tree.unmount();

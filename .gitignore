@@ -25,3 +25,5 @@ ios/
 expo-env.d.ts
 # @end expo-cli
 supabase/.temp/
+
+__pycache__/
