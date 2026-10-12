@@ -3,16 +3,13 @@ export const catalogConfig = {
   tmdbBase: process.env.EXPO_PUBLIC_TMDB_BASE ?? 'https://api.themoviedb.org/3',
   tmdbImage: process.env.EXPO_PUBLIC_TMDB_IMAGE ?? 'https://image.tmdb.org/t/p/w500',
   anilistEndpoint: process.env.EXPO_PUBLIC_ANILIST_ENDPOINT ?? 'https://graphql.anilist.co',
-  tvdbApiKey: process.env.EXPO_PUBLIC_TVDB_API_KEY,
-  tvdbBase: process.env.EXPO_PUBLIC_TVDB_BASE ?? 'https://api4.thetvdb.com/v4',
+  // TVDB has no client-side entry point by design: it is reached only through
+  // the `tvdb-proxy` Supabase Edge Function, so its key and base URL live in
+  // that function's secrets and never enter the JS bundle.
 };
 
 export function getTmdbApiKey(): string | undefined {
   return process.env.EXPO_PUBLIC_TMDB_API_KEY || catalogConfig.tmdbApiKey;
-}
-
-export function getTvdbApiKey(): string | undefined {
-  return process.env.EXPO_PUBLIC_TVDB_API_KEY || catalogConfig.tvdbApiKey;
 }
 
 export function imageUrl(path: string | null | undefined, size: 'poster' | 'backdrop' | 'still' = 'poster'): string | undefined {

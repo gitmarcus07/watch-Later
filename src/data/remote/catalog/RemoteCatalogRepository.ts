@@ -493,22 +493,36 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
   }
 
   async getRecentlyReleased(signal?: AbortSignal): Promise<CatalogMedia[]> {
-    // TMDB's own "now playing / on the air" lists: genuinely the latest
-    // released movies and currently airing series, newest first. Three pages
-    // per source so the full screen has room beyond the home rail's six.
-    const pages = [1, 2, 3];
+    // Last 3 months across Hollywood, Bollywood, and anime, mixed newest-first.
+    // Movies/shows come from TMDB Discover constrained to the exact calendar
+    // window (global + English + Hindi so Bollywood is always represented);
+    // anime comes from AniList sorted by start date and filtered to the same
+    // window in JS. Three pages per TMDB source would be 18 requests, so two
+    // pages per source keeps the screen fast while still filling the grid.
+    const today = new Date();
+    const to = `${today.getFullYear()}-${String(today.getMonth() + 1).padStart(2, '0')}-${String(today.getDate()).padStart(2, '0')}`;
+    const fromDate = new Date(today.getFullYear(), today.getMonth() - 3, today.getDate());
+    const from = `${fromDate.getFullYear()}-${String(fromDate.getMonth() + 1).padStart(2, '0')}-${String(fromDate.getDate()).padStart(2, '0')}`;
+    const moviePages = [1, 2];
+    const tvPages = [1, 2];
     const settled = await Promise.allSettled([
-      ...pages.map((page) => tmdbClient.nowPlayingMovies(signal, page).then((response) => (response.results ?? []).map(mapTmdbMovie))),
-      ...pages.map((page) => tmdbClient.onTheAirTv(signal, page).then((response) => (response.results ?? []).map(mapTmdbTv))),
+      ...moviePages.map((page) => tmdbClient.discoverMovies(page, { releaseDateGte: from, releaseDateLte: to }, signal).then((response) => (response.results ?? []).map(mapTmdbMovie))),
+      ...moviePages.map((page) => tmdbClient.discoverMovies(page, { language: 'hi', releaseDateGte: from, releaseDateLte: to }, signal).then((response) => (response.results ?? []).map(mapTmdbMovie))),
+      tmdbClient.discoverMovies(1, { language: 'en', releaseDateGte: from, releaseDateLte: to }, signal).then((response) => (response.results ?? []).map(mapTmdbMovie)),
+      ...tvPages.map((page) => tmdbClient.discoverTv(page, { firstAirDateGte: from, firstAirDateLte: to }, signal).then((response) => (response.results ?? []).map(mapTmdbTv))),
+      ...tvPages.map((page) => tmdbClient.discoverTv(page, { language: 'hi', firstAirDateGte: from, firstAirDateLte: to, watchRegion: 'IN', watchProviders: '8|119|122' }, signal).then((response) => (response.results ?? []).map(mapTmdbTv))),
+      tmdbClient.discoverTv(1, { language: 'en', firstAirDateGte: from, firstAirDateLte: to }, signal).then((response) => (response.results ?? []).map(mapTmdbTv)),
+      anilistClient.recentAnimePage(1, 20, signal).then((response) => response.media.map(mapAniListAnime).filter((item) => item.releaseDate !== undefined && item.releaseDate >= from && item.releaseDate <= to)),
+      anilistClient.recentAnimePage(2, 20, signal).then((response) => response.media.map(mapAniListAnime).filter((item) => item.releaseDate !== undefined && item.releaseDate >= from && item.releaseDate <= to)),
     ]);
     if (signal?.aborted) throw settled.find((result): result is PromiseRejectedResult => result.status === 'rejected')?.reason;
     const fulfilled = settled.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
     if (!fulfilled.length) {
       const reason = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected')?.reason;
       if (reason instanceof Error) throw reason;
-      throw new CatalogError('tvdb', 'network');
+      throw new CatalogError('tmdb', 'network');
     }
-    return orderByRecency(fulfilled.flat(), 60);
+    return orderByRecency(fulfilled.flat(), 90);
   }
 
   /**
@@ -674,21 +688,28 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
   async getTrendingAllPage(page: number, signal?: AbortSignal): Promise<PagedCatalog> {
     const safePage = Math.max(1, Math.floor(page) || 1);
     // TMDB's own trending lists plus AniList's trending anime, interleaved
-    // so the shelf mixes movies, shows, and anime. Anime joins page one
-    // only (AniList trending is a single ranked snapshot).
-    const [movies, series, anime] = await Promise.all([
+    // so the shelf mixes movies, shows, and anime. Bollywood joins explicitly
+    // (Hindi discover) so Hindi titles are always represented alongside
+    // Hollywood trending — TMDB trending alone skews English. Anime joins page
+    // one only (AniList trending is a single ranked snapshot).
+    const [movies, series, anime, bollywoodMovies, bollywoodSeries] = await Promise.all([
       tmdbClient.trendingMovies(signal, safePage),
       tmdbClient.trendingTv(signal, safePage),
       safePage === 1 ? anilistClient.trendingAnime(signal).catch(() => null) : Promise.resolve(null),
+      tmdbClient.discoverMovies(safePage, { language: 'hi' }, signal).catch(() => null),
+      tmdbClient.discoverTv(safePage, { language: 'hi', watchRegion: 'IN', watchProviders: '8|119|122', voteCountGte: 40 }, signal).catch(() => null),
     ]);
     const size = 20;
     const animeItems = (anime ?? []).slice(0, 10).map(mapAniListAnime);
+    const groups = [
+      (movies.results ?? []).slice(0, size).map(mapTmdbMovie),
+      (series.results ?? []).slice(0, size).map(mapTmdbTv),
+      ((bollywoodMovies?.results ?? []).slice(0, size).map(mapTmdbMovie)),
+      ((bollywoodSeries?.results ?? []).slice(0, size).map(mapTmdbTv)),
+      animeItems,
+    ];
     return {
-      items: interleaveRanked([
-        (movies.results ?? []).slice(0, size).map(mapTmdbMovie),
-        (series.results ?? []).slice(0, size).map(mapTmdbTv),
-        animeItems,
-      ], size * 2),
+      items: interleaveRanked(groups, size * 2),
       page: safePage,
       totalPages: RemoteCatalogRepository.maxPages(Math.max(movies.total_pages ?? 1, series.total_pages ?? 1)),
     };
@@ -696,25 +717,41 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
 
   async getPopularMoviesPage(page: number, region?: string, signal?: AbortSignal): Promise<PagedCatalog> {
     const safePage = Math.max(1, Math.floor(page) || 1);
-    // TMDB popular mixes Hollywood, Bollywood, and everything else by
-    // worldwide popularity — exactly the Movies shelf.
-    const response = await tmdbClient.popularMovies(safePage, region, signal);
+    // Hollywood + Bollywood mixed: English and Hindi originals interleaved by
+    // popularity so neither dominates the Movies shelf.
+    void region;
+    const [hollywood, bollywood] = await Promise.all([
+      tmdbClient.discoverMovies(safePage, { language: 'en' }, signal),
+      tmdbClient.discoverMovies(safePage, { language: 'hi' }, signal),
+    ]);
     const size = 20;
     return {
-      items: (response.results ?? []).slice(0, size).map(mapTmdbMovie),
+      items: interleaveRanked([
+        (hollywood.results ?? []).slice(0, size).map(mapTmdbMovie),
+        (bollywood.results ?? []).slice(0, size).map(mapTmdbMovie),
+      ], size * 2),
       page: safePage,
-      totalPages: RemoteCatalogRepository.maxPages(response.total_pages),
+      totalPages: RemoteCatalogRepository.maxPages(Math.max(hollywood.total_pages ?? 1, bollywood.total_pages ?? 1)),
     };
   }
 
   async getPopularSeriesPage(page: number, region?: string, signal?: AbortSignal): Promise<PagedCatalog> {
     const safePage = Math.max(1, Math.floor(page) || 1);
-    const response = await tmdbClient.popularTv(safePage, region, signal);
+    // Hollywood (all English shows) + Bollywood OTT-only (Hindi + Indian OTT
+    // providers with traction, keeping daily soaps out), interleaved.
+    void region;
+    const [hollywood, bollywood] = await Promise.all([
+      tmdbClient.discoverTv(safePage, { language: 'en' }, signal),
+      tmdbClient.discoverTv(safePage, { language: 'hi', watchRegion: 'IN', watchProviders: '8|119|122', voteCountGte: 40 }, signal),
+    ]);
     const size = 20;
     return {
-      items: (response.results ?? []).slice(0, size).map(mapTmdbTv),
+      items: interleaveRanked([
+        (hollywood.results ?? []).slice(0, size).map(mapTmdbTv),
+        (bollywood.results ?? []).slice(0, size).map(mapTmdbTv),
+      ], size * 2),
       page: safePage,
-      totalPages: RemoteCatalogRepository.maxPages(response.total_pages),
+      totalPages: RemoteCatalogRepository.maxPages(Math.max(hollywood.total_pages ?? 1, bollywood.total_pages ?? 1)),
     };
   }
 
@@ -839,20 +876,36 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
   }
 
   /**
-   * Upcoming series: TMDB titles starting today or later, worldwide —
-   * Hollywood and Bollywood premieres in one oldest-first list.
+   * Upcoming series: TMDB titles starting today or later — Hollywood and
+   * Bollywood premieres in one oldest-first list. The device region joins in
+   * when it is neither US nor IN, mirroring the movies slate.
    */
   async getUpcomingSeriesPage(page: number, region?: string, signal?: AbortSignal): Promise<PagedCatalog> {
     const safePage = Math.max(1, Math.floor(page) || 1);
-    const response = await tmdbClient.upcomingTvSeries(safePage, region, signal);
-    const items = (response.results ?? [])
+    const regions = ['US', 'IN', ...(region && region !== 'US' && region !== 'IN' ? [region] : [])];
+    const settled = await Promise.allSettled(
+      regions.map((code) => tmdbClient.upcomingTvSeries(safePage, code, signal)),
+    );
+    const fulfilled = settled.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
+    if (!fulfilled.length) {
+      const reason = settled.find((result): result is PromiseRejectedResult => result.status === 'rejected')?.reason;
+      if (reason instanceof Error) throw reason;
+      throw new CatalogError('tmdb', 'network');
+    }
+    const seen = new Set<string>();
+    const items = fulfilled
+      .flatMap((response) => response.results ?? [])
       .map(mapTmdbTv)
-      .filter((item) => isUpcomingMedia(item))
+      .filter((item) => {
+        if (seen.has(item.id)) return false;
+        seen.add(item.id);
+        return isUpcomingMedia(item);
+      })
       .sort((a, b) => (a.releaseDate ?? '9999').localeCompare(b.releaseDate ?? '9999'));
     return {
       items,
       page: safePage,
-      totalPages: RemoteCatalogRepository.maxPages(response.total_pages),
+      totalPages: RemoteCatalogRepository.maxPages(Math.max(...fulfilled.map((response) => response.total_pages ?? 1))),
     };
   }
 

@@ -165,9 +165,11 @@ describe('tvdb client auth and search', () => {
   });
   afterEach(() => jest.restoreAllMocks());
 
-  it('logs in once and filters non-title search hits', async () => {
-    const previousKey = process.env.EXPO_PUBLIC_TVDB_API_KEY;
-    process.env.EXPO_PUBLIC_TVDB_API_KEY = 'test-key';
+  it('routes search through the tvdb-proxy function and filters non-title hits', async () => {
+    const previousUrl = process.env.EXPO_PUBLIC_SUPABASE_URL;
+    const previousAnon = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+    process.env.EXPO_PUBLIC_SUPABASE_URL = 'https://example.supabase.co';
+    process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY = 'public-anon-key';
     try {
       const fetchSpy = jest.spyOn(globalThis, 'fetch');
       const searchPage = {
@@ -176,17 +178,29 @@ describe('tvdb client auth and search', () => {
           { objectID: 'list-1', type: 'list', name: 'A list', year: '2020' },
         ],
       };
-      fetchSpy.mockResolvedValueOnce(response({ data: { token: 'secret-token' } }));
       fetchSpy.mockResolvedValueOnce(response(searchPage));
       fetchSpy.mockResolvedValueOnce(response(searchPage));
       const first = await tvdbClient.search('Breaking Bad', 'series');
       expect(first.map((item) => item.objectID)).toEqual(['series-81189']);
       await tvdbClient.search('Breaking Bad', 'series');
-      const logins = fetchSpy.mock.calls.filter((call) => String(call[0]).endsWith('/login'));
-      expect(logins).toHaveLength(1);
+
+      // Both calls must hit the edge function, not api4.thetvdb.com directly.
+      const [urlInit, bodyInit] = fetchSpy.mock.calls[0] as [string, RequestInit];
+      expect(urlInit).toBe('https://example.supabase.co/functions/v1/tvdb-proxy');
+      expect(bodyInit.method).toBe('POST');
+      const sent = JSON.parse(String(bodyInit.body)) as { path: string; params: Record<string, string> };
+      expect(sent.path).toBe('search');
+      expect(sent.params).toMatchObject({ query: 'Breaking Bad', type: 'series' });
+
+      // The anon key (safe to ship) authorizes the call; no TVDB secret is sent.
+      const headers = bodyInit.headers as Record<string, string>;
+      expect(headers.Authorization).toBe('Bearer public-anon-key');
+      expect(String(bodyInit.body)).not.toMatch(/apikey|tvdb-key|secret/i);
     } finally {
-      if (previousKey === undefined) delete process.env.EXPO_PUBLIC_TVDB_API_KEY;
-      else process.env.EXPO_PUBLIC_TVDB_API_KEY = previousKey;
+      if (previousUrl === undefined) delete process.env.EXPO_PUBLIC_SUPABASE_URL;
+      else process.env.EXPO_PUBLIC_SUPABASE_URL = previousUrl;
+      if (previousAnon === undefined) delete process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+      else process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY = previousAnon;
     }
   });
 });

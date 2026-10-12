@@ -32,8 +32,10 @@ import {
   setupNotificationHandler,
 } from "@/features/notifications/scheduler";
 import { Notifications } from "@/lib/notifications";
+import notifee from "@notifee/react-native";
+import "@/features/notifications/releaseDayBackground";
 import { refreshOttReminders } from "@/features/ott/ottReminders";
-import { refreshUpcomingReminders, resolveNotificationTarget } from "@/features/notifications/upcomingReminders";
+import { ensureReleasesChannel, handleMoveToAsap, interpretReleaseDayEvent, isReleaseDayData, refreshUpcomingReminders, resolveNotificationTarget } from "@/features/notifications/upcomingReminders";
 import { watchStateSyncRepository } from "@/data/local/repositories/SqliteWatchStateRepository";
 
 const database = new SqliteDatabaseRepository();
@@ -61,6 +63,7 @@ export default function RootLayout() {
 
   useEffect(() => {
     setupNotificationHandler();
+    void ensureReleasesChannel();
     void hydrateSession();
     void useAppearanceStore.getState().hydrate();
     void useNotificationStore.getState().hydrate();
@@ -144,8 +147,9 @@ export default function RootLayout() {
 
   useEffect(() => startAutoSync(), []);
 
-  // Tapping a release-day alert opens that title. Guarded: Expo Go has no
-  // native notification module, so subscribing must never crash startup.
+  // expo-notifications taps (OTT premieres + watchlist reminders). Guarded:
+  // Expo Go has no native notification module, so subscribing must never
+  // crash startup.
   useEffect(() => {
     try {
       const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
@@ -157,6 +161,41 @@ export default function RootLayout() {
     } catch {
       return undefined;
     }
+  }, []);
+
+  // Release-day taps + "Move to ASAP" via Notifee (foreground). The action
+  // button carries no launchActivity, so it never opens the app — it saves
+  // to ASAP and dismisses. Guarded for Expo Go like above.
+  useEffect(() => {
+    try {
+      return notifee.onForegroundEvent(async ({ type, detail }) => {
+        const outcome = interpretReleaseDayEvent({ type, detail });
+        if (outcome.kind === 'open') {
+          router.replace({ pathname: '/media/[id]', params: { id: outcome.mediaId } });
+        } else if (outcome.kind === 'move') {
+          await handleMoveToAsap({ data: outcome.data, notificationId: outcome.notificationId });
+        }
+      });
+    } catch {
+      return undefined;
+    }
+  }, []);
+
+  // Killed-state body tap: Notifee opens the app; route to the title once the
+  // initial notification is consumed. Action presses never open the app, so
+  // anything initial here is always a body tap.
+  useEffect(() => {
+    void (async () => {
+      try {
+        const initial = await notifee.getInitialNotification();
+        const data: unknown = initial?.notification?.data ?? null;
+        if (isReleaseDayData(data)) {
+          router.replace({ pathname: '/media/[id]', params: { id: data.mediaId } });
+        }
+      } catch {
+        // No native module or no initial notification: nothing to route.
+      }
+    })();
   }, []);
 
   // Ready = local init only (session restore + SQLite). Network sync always runs in the background.
@@ -197,7 +236,7 @@ export default function RootLayout() {
               {!splashDone ? (
                 <SplashScreenView
                   isReady={appReady}
-                  minDuration={6000}
+                  minDuration={4000}
                   onClap={() =>
                     Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy)
                   }

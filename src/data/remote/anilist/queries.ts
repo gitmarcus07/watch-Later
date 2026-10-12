@@ -66,6 +66,16 @@ query PopularAnime($page: Int!, $perPage: Int!) {
   }
 }`;
 
+export const ANIME_RECENT_PAGE_QUERY = `
+query RecentAnimePage($page: Int!, $perPage: Int!) {
+  Page(page: $page, perPage: $perPage) {
+    pageInfo { total perPage currentPage lastPage hasNextPage }
+    media(type: ANIME, sort: START_DATE_DESC, isAdult: false) {
+      ${ANIME_FIELDS}
+    }
+  }
+}`;
+
 export const ANIME_TOP_RATED_QUERY = `
 query TopRatedAnime($page: Int!, $perPage: Int!) {
   Page(page: $page, perPage: $perPage) {

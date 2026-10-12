@@ -1,7 +1,7 @@
 import { CatalogError } from '@/domain/errors/CatalogError';
 import { catalogConfig } from '@/data/remote/catalog/config';
 import { requestJson } from '@/data/remote/catalog/request';
-import { ANIME_DETAIL_QUERY, ANIME_POPULAR_QUERY, ANIME_SEARCH_QUERY, ANIME_TOP_RATED_QUERY, ANIME_TRENDING_QUERY, ANIME_UPCOMING_PAGE_QUERY } from './queries';
+import { ANIME_DETAIL_QUERY, ANIME_POPULAR_QUERY, ANIME_RECENT_PAGE_QUERY, ANIME_SEARCH_QUERY, ANIME_TOP_RATED_QUERY, ANIME_TRENDING_QUERY, ANIME_UPCOMING_PAGE_QUERY } from './queries';
 import type { AniListMediaDto, AniListResponse } from './types';
 
 async function query<T>(queryText: string, variables: Record<string, string | number>, signal?: AbortSignal): Promise<T> {
@@ -50,6 +50,16 @@ export const anilistClient = {
   },
   async popularAnime(page = 1, perPage = 24, signal?: AbortSignal): Promise<{ media: AniListMediaDto[]; hasNextPage: boolean; lastPage?: number }> {
     const response = await query<AniListResponse>(ANIME_POPULAR_QUERY, { page, perPage }, signal);
+    const pageData = response.data?.Page;
+    if (!Array.isArray(pageData?.media)) throw new CatalogError('anilist', 'invalid_response');
+    return {
+      media: pageData.media.filter((item): item is AniListMediaDto => item !== null && Number.isSafeInteger(item.id)),
+      hasNextPage: pageData.pageInfo?.hasNextPage ?? false,
+      lastPage: pageData.pageInfo?.lastPage ?? undefined,
+    };
+  },
+  async recentAnimePage(page = 1, perPage = 20, signal?: AbortSignal): Promise<{ media: AniListMediaDto[]; hasNextPage: boolean; lastPage?: number }> {
+    const response = await query<AniListResponse>(ANIME_RECENT_PAGE_QUERY, { page, perPage }, signal);
     const pageData = response.data?.Page;
     if (!Array.isArray(pageData?.media)) throw new CatalogError('anilist', 'invalid_response');
     return {

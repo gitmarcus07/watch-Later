@@ -94,7 +94,7 @@ export default function HomeScreen() {
     <FadeInView delay={160}>
     <View style={styles.section}>
       <View style={styles.rowHeader}>
-        <SectionHeader title="New Releases" subtitle="Fresh movies and shows" />
+        <SectionHeader title="New Releases" />
         <Pressable accessibilityRole="button" accessibilityLabel="See all new releases" onPress={() => router.push('/new-releases')} style={styles.seeAll}><AppText variant="label" style={styles.seeAllText}>See all</AppText><Ionicons name="chevron-forward" size={15} color={colors.accent} /></Pressable>
       </View>
       {recentQuery.isLoading ? <View style={styles.skeletonRow}>{[0, 1, 2, 3].map((index) => <PosterSkeleton key={index} />)}</View>

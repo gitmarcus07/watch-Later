@@ -19,6 +19,7 @@
     },
     "android": {
       "package": "com.watchlater.app",
+      "versionCode": 1,
       "icon": "./assets/icon.png",
       "adaptiveIcon": {
         "foregroundImage": "./assets/adaptive-icon.png",
@@ -33,8 +34,8 @@
       [
         "expo-notifications",
         {
-          "icon": "./assets/notification-icon.png",
-          "color": "#A855F7",
+          "icon": "./assets/ic_stat_watch_later_96.png",
+          "color": "#8614D9",
           "sounds": [
             "./assets/wl_now_showing.wav"
           ]
@@ -56,7 +57,20 @@
           }
         }
       ],
-      "expo-web-browser"
+      "expo-web-browser",
+      "./plugins/withReleaseDayDrawables.js",
+      "./plugins/withNotifeeRepo.js",
+      "./plugins/withReleaseSigning.js",
+      [
+        "expo-build-properties",
+        {
+          "android": {
+            "enableMinifyInReleaseBuilds": true,
+            "enableShrinkResourcesInReleaseBuilds": true,
+            "extraProguardRules": "-keep class com.swmansion.reanimated.** { *; }\n-keep class com.swmansion.worklets.** { *; }\n-keep class com.facebook.react.turbomodule.** { *; }\n-keep class com.facebook.jni.** { *; }\n-keep class com.facebook.proguard.annotations.** { *; }\n-keep class com.facebook.react.bridge.** { *; }\n-keep class com.facebook.react.uimanager.** { *; }\n-keep class com.facebook.hermes.unicode.** { *; }\n-keep class app.notifee.** { *; }\n-dontwarn app.notifee.**\n-keep class com.horcrux.svg.** { *; }\n-dontwarn com.horcrux.svg.**\n-keep class com.swmansion.gesturehandler.** { *; }\n-keep class com.swmansion.screens.** { *; }\n-keep class com.th3rdwave.safeareacontext.** { *; }\n-keep class com.facebook.react.modules.** { *; }\n-keep class com.google.firebase.messaging.** { *; }\n-dontwarn com.google.firebase.**\n-dontwarn com.google.android.gms.**\n-keep class com.google.android.gms.** { *; }"
+          }
+        }
+      ]
     ],
     "experiments": {
       "typedRoutes": true

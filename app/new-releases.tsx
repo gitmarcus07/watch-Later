@@ -25,7 +25,7 @@ export default function NewReleasesScreen() {
   const openMedia = (id: string) => router.push({ pathname: '/media/[id]', params: { id } });
 
   return <Screen>
-    <FadeInView><View style={styles.header}><IconButton name="arrow-back" label="Go back" onPress={() => router.back()} /><View style={styles.title}><AppText variant="heading1">New Releases</AppText><AppText variant="bodySmall" muted>Fresh movies and shows</AppText></View></View></FadeInView>
+    <FadeInView><View style={styles.header}><IconButton name="arrow-back" label="Go back" onPress={() => router.back()} /><View style={styles.title}><AppText variant="heading1">New Releases</AppText></View></View></FadeInView>
     {query.isLoading ? <FlatList data={[0, 1, 2, 3, 4, 5]} keyExtractor={(item) => String(item)} numColumns={2} columnWrapperStyle={styles.gridRow} contentContainerStyle={styles.grid} style={styles.flat} renderItem={() => <PosterSkeleton />} showsVerticalScrollIndicator={false} />
       : query.isError ? <ErrorView message="Could not load new releases. Check your connection and try again." onRetry={() => void query.refetch()} />
       : items.length ? <FlatList

@@ -26,4 +26,10 @@ expo-env.d.ts
 # @end expo-cli
 supabase/.temp/
 
+# Release signing — never commit the keystore or its password
+credentials/
+
 __pycache__/
+
+# EAS local credentials (contain plaintext secrets)
+credentials.json

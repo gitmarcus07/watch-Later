@@ -18,6 +18,7 @@ export default function AboutScreen() {
     <View style={styles.card}>
       <AppText variant="heading3">Acknowledgements</AppText>
       <AppText variant="bodySmall" muted style={styles.copy}>Movie and TV metadata is provided by TMDb. This product uses the TMDb API but is not endorsed or certified by TMDb.</AppText>
+      <AppText variant="bodySmall" muted style={styles.copy}>Some movie and series details, including age ratings and credits, are provided by TheTVDB.com. This product uses TheTVDB.com data but is not endorsed or certified by TheTVDB.com.</AppText>
       <AppText variant="bodySmall" muted style={styles.copy}>Anime metadata is provided by AniList.</AppText>
       <AppText variant="bodySmall" muted style={styles.copy}>Watch Later does not provide or host any streaming content.</AppText>
     </View>

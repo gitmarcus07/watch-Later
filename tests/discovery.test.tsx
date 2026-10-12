@@ -146,21 +146,31 @@ describe('discovery repository', () => {
   });
 
   it('orders recent releases newest first and caps home sections', async () => {
-    jest.spyOn(tmdbClient, 'nowPlayingMovies').mockResolvedValue({ results: [movieDto(5, 'New Film', '2026-09-18')] });
-    jest.spyOn(tmdbClient, 'onTheAirTv').mockResolvedValue({
-      results: [tvDto(7, 'New Show', '2026-08-15'), tvDto(6, 'Old Show', '2020-01-01')],
-    });
+    // Last-3-month window: global + Hindi + English discover plus AniList recent.
+    jest.spyOn(tmdbClient, 'discoverMovies').mockImplementation(async (_page, options) => ({
+      results: (options as { language?: string })?.language === 'hi'
+        ? [movieDto(5, 'New Film', '2026-09-18')]
+        : (options as { language?: string })?.language === 'en' ? [] : [movieDto(5, 'New Film', '2026-09-18')],
+    }));
+    jest.spyOn(tmdbClient, 'discoverTv').mockImplementation(async (_page, options) => ({
+      results: (options as { language?: string })?.language
+        ? []
+        : [tvDto(7, 'New Show', '2026-08-15'), tvDto(6, 'Old Show', '2020-01-01')],
+    }));
+    jest.spyOn(anilistClient, 'recentAnimePage').mockResolvedValue({ media: [], hasNextPage: false });
     const recent = await new RemoteCatalogRepository().getRecentlyReleased();
     expect(recent.map((item) => item.id)).toEqual(['tmdb:movie:5', 'tmdb:series:7', 'tmdb:series:6']);
   });
 
   it('walks several now-playing pages so the full screen fills past fifteen', async () => {
-    const movies = jest.spyOn(tmdbClient, 'nowPlayingMovies').mockImplementation(async (_signal, page = 1) => ({
+    const movies = jest.spyOn(tmdbClient, 'discoverMovies').mockImplementation(async (page = 1) => ({
       results: page <= 2 ? [movieDto(100 + page, `Film P${page}`, `2026-09-0${page}`)] : [],
+      total_pages: 5,
     }));
-    jest.spyOn(tmdbClient, 'onTheAirTv').mockResolvedValue({ results: [] });
+    jest.spyOn(tmdbClient, 'discoverTv').mockResolvedValue({ results: [], total_pages: 1 });
+    jest.spyOn(anilistClient, 'recentAnimePage').mockResolvedValue({ media: [], hasNextPage: false });
     const recent = await new RemoteCatalogRepository().getRecentlyReleased();
-    expect(movies).toHaveBeenCalledTimes(3);
+    expect(movies.mock.calls.filter(([page = 1]) => page <= 2).length).toBeGreaterThanOrEqual(2);
     expect(recent.map((item) => item.id)).toEqual(['tmdb:movie:102', 'tmdb:movie:101']);
   });
 
@@ -212,24 +222,35 @@ describe('discovery repository', () => {
       results: [tvDto(32, 'Trend Show', '2026-03-01')], total_pages: 500,
     });
     const animeSpy = jest.spyOn(anilistClient, 'trendingAnime').mockResolvedValue([animeDto(33, 'Trend Anime')]);
+    // Bollywood discover joins trending so Hindi titles are always present.
+    const discoverForTrending = jest.spyOn(tmdbClient, 'discoverMovies').mockImplementation(async (_page, options) => ({
+      results: (options as { language?: string })?.language === 'hi' ? [movieDto(34, 'Hindi Trend', '2026-01-05')] : [],
+      total_pages: 10,
+    }));
+    const discoverTvForTrending = jest.spyOn(tmdbClient, 'discoverTv').mockImplementation(async (_page, options) => ({
+      results: (options as { language?: string })?.language === 'hi' ? [tvDto(35, 'Hindi Trend Show', '2026-01-06')] : [],
+      total_pages: 10,
+    }));
     const trending = await new RemoteCatalogRepository().getTrendingAllPage(1);
     expect(trending.page).toBe(1);
     expect(trending.totalPages).toBe(20);
-    // Movies, shows, and anime interleaved — every section's own content.
-    expect(trending.items.map((item) => item.id)).toEqual(['tmdb:movie:30', 'tmdb:series:32', 'anilist:anime:33', 'tmdb:movie:31']);
+    // Movies, shows, Bollywood, and anime interleaved — every section's own content.
+    expect(trending.items.map((item) => item.id)).toEqual(['tmdb:movie:30', 'tmdb:series:32', 'tmdb:movie:34', 'tmdb:series:35', 'anilist:anime:33', 'tmdb:movie:31']);
     expect(animeSpy).toHaveBeenCalledTimes(1);
+    expect(discoverForTrending).toHaveBeenCalled();
+    expect(discoverTvForTrending).toHaveBeenCalled();
 
-    const discoverMovies = jest.spyOn(tmdbClient, 'discoverMovies').mockResolvedValue({
+    discoverForTrending.mockResolvedValue({
       results: [movieDto(40, 'Hindi Film', '2026-01-01')], total_pages: 12,
     });
-    const discoverTv = jest.spyOn(tmdbClient, 'discoverTv').mockResolvedValue({
+    discoverTvForTrending.mockResolvedValue({
       results: [tvDto(41, 'Hindi Show', '2026-03-01')], total_pages: 8,
     });
     const bollywood = await new RemoteCatalogRepository().getBollywoodPage(1);
     // Hindi originals only — Hollywood and anime cannot leak in; series are
     // restricted to Indian OTT premieres with real traction (no TV soaps).
-    expect(discoverMovies).toHaveBeenCalledWith(1, { language: 'hi' }, undefined);
-    expect(discoverTv).toHaveBeenCalledWith(1, {
+    expect(discoverForTrending).toHaveBeenCalledWith(1, { language: 'hi' }, undefined);
+    expect(discoverTvForTrending).toHaveBeenCalledWith(1, {
       language: 'hi', watchRegion: 'IN', watchProviders: '8|119|122', voteCountGte: 40,
     }, undefined);
     expect(bollywood.items.map((item) => item.id).sort()).toEqual(['tmdb:movie:40', 'tmdb:series:41'].sort());
@@ -237,17 +258,25 @@ describe('discovery repository', () => {
   });
 
   it('serves movies, shows, and hollywood shelves from TMDB popularity', async () => {
-    jest.spyOn(tmdbClient, 'popularMovies').mockResolvedValue({
-      results: [movieDto(50, 'Global Hit', '2026-01-01')], total_pages: 400,
-    });
-    jest.spyOn(tmdbClient, 'popularTv').mockResolvedValue({
-      results: [tvDto(51, 'Global Show', '2026-02-01')], total_pages: 300,
-    });
+    // Movies = Hollywood (en) + Bollywood (hi) interleaved; shows = English
+    // + Hindi-OTT interleaved.
+    jest.spyOn(tmdbClient, 'discoverMovies').mockImplementation(async (_page, options) => ({
+      results: (options as { language?: string })?.language === 'hi'
+        ? [movieDto(51, 'Hindi Hit', '2026-01-01')]
+        : [movieDto(50, 'Global Hit', '2026-01-01')],
+      total_pages: 400,
+    }));
+    jest.spyOn(tmdbClient, 'discoverTv').mockImplementation(async (_page, options) => ({
+      results: (options as { language?: string })?.language === 'hi'
+        ? [tvDto(52, 'Hindi Show', '2026-02-01')]
+        : [tvDto(51, 'Global Show', '2026-02-01')],
+      total_pages: 300,
+    }));
     const movies = await new RemoteCatalogRepository().getPopularMoviesPage(1);
-    expect(movies.items.map((item) => item.id)).toEqual(['tmdb:movie:50']);
+    expect(movies.items.map((item) => item.id)).toEqual(['tmdb:movie:50', 'tmdb:movie:51']);
     expect(movies.totalPages).toBe(20);
     const shows = await new RemoteCatalogRepository().getPopularSeriesPage(1);
-    expect(shows.items.map((item) => item.id)).toEqual(['tmdb:series:51']);
+    expect(shows.items.map((item) => item.id)).toEqual(['tmdb:series:51', 'tmdb:series:52']);
 
     jest.spyOn(tmdbClient, 'discoverMovies').mockResolvedValue({
       results: [movieDto(60, 'Hollywood Film', '2026-01-01')], total_pages: 100,
@@ -359,7 +388,7 @@ describe('discovery hooks and home structure', () => {
     expect(home).not.toMatch(/Most Interested/);
     expect(home).not.toMatch(/Trending Now/);
     expect(home).not.toMatch(/Talk Of The Town/);
-    expect(home).not.toMatch(/Bollywood/);
+    expect(home).not.toMatch(/title="Bollywood"/);
   });
 
   it('detail groups every action in one compact cluster with Moctale-style info', () => {

@@ -1,6 +1,5 @@
 import { CatalogError } from '@/domain/errors/CatalogError';
-import { catalogConfig, getTvdbApiKey } from '@/data/remote/catalog/config';
-import { requestJson, withQuery } from '@/data/remote/catalog/request';
+import { requestJson } from '@/data/remote/catalog/request';
 import type {
   TvdbEpisodeDto,
   TvdbFilterMovieDto,
@@ -13,61 +12,37 @@ import type {
   TvdbSingleResponse,
 } from './types';
 
-function base(): string {
-  return catalogConfig.tvdbBase.replace(/\/$/, '');
+// TVDB is reached only through the `tvdb-proxy` Supabase Edge Function, never
+// directly. The API key lives in that function's secrets; nothing here ships a
+// secret, and TVDB's login/token lifecycle is entirely server-side — which is
+// why this client no longer caches a bearer token at all.
+const PROXY_FUNCTION = 'tvdb-proxy';
+
+function proxyUrl(): string {
+  const base = (process.env.EXPO_PUBLIC_SUPABASE_URL ?? '').replace(/\/$/, '');
+  if (!base) throw new CatalogError('tvdb', 'configuration');
+  return `${base}/functions/v1/${PROXY_FUNCTION}`;
 }
 
-function url(path: string): string {
-  return `${base()}/${path.replace(/^\//, '')}`;
+/** The public anon key — safe to ship. It only authorizes the call to Supabase. */
+function anonKey(): string {
+  const key = process.env.EXPO_PUBLIC_SUPABASE_ANON_KEY;
+  if (!key) throw new CatalogError('tvdb', 'configuration');
+  return key;
 }
 
-/** Cached bearer token + expiry (TVDB tokens live ~a month). */
-let cachedToken: string | undefined;
-let tokenExpiresAt = 0;
-let loginInFlight: Promise<string> | undefined;
-
-async function login(signal?: AbortSignal): Promise<string> {
-  const apiKey = getTvdbApiKey();
-  if (!apiKey) throw new CatalogError('tvdb', 'configuration');
-  const response = await requestJson<{ data?: { token?: string | null } | null }>(
+async function get<T>(path: string, params: Record<string, string | number | undefined>, signal?: AbortSignal): Promise<T> {
+  return requestJson<T>(
     'tvdb',
-    url('login'),
-    { method: 'POST', headers: { 'Content-Type': 'application/json', Accept: 'application/json' }, body: JSON.stringify({ apikey: apiKey }) },
+    proxyUrl(),
+    {
+      method: 'POST',
+      headers: { 'Content-Type': 'application/json', Authorization: `Bearer ${anonKey()}` },
+      // Undefined/null params are dropped by the proxy.
+      body: JSON.stringify({ path, params }),
+    },
     signal,
   );
-  const token = response?.data?.token;
-  if (!token) throw new CatalogError('tvdb', 'unauthorized', 401);
-  cachedToken = token;
-  // Refresh a day before the nominal month-long lifetime.
-  tokenExpiresAt = Date.now() + 29 * 24 * 60 * 60 * 1000;
-  return token;
-}
-
-async function bearer(signal?: AbortSignal): Promise<string> {
-  if (cachedToken && Date.now() < tokenExpiresAt) return cachedToken;
-  if (!loginInFlight) {
-    loginInFlight = login(signal).finally(() => {
-      loginInFlight = undefined;
-    });
-  }
-  return loginInFlight;
-}
-
-async function get<T>(path: string, params: Record<string, string | number | undefined>, signal?: AbortSignal, retryAuth = true): Promise<T> {
-  const token = await bearer(signal);
-  // Prefer English text; TVDB defaults vary per entry otherwise.
-  const headers = { Authorization: `Bearer ${token}`, Accept: 'application/json', 'Accept-Language': 'en' };
-  try {
-    return await requestJson<T>('tvdb', withQuery(url(path), params), { headers }, signal);
-  } catch (error) {
-    // Tokens can be revoked server-side; one transparent re-login, then give up.
-    if (retryAuth && error instanceof CatalogError && (error.status === 401 || error.status === 403)) {
-      cachedToken = undefined;
-      const fresh = await bearer(signal);
-      return requestJson<T>('tvdb', withQuery(url(path), params), { headers: { ...headers, Authorization: `Bearer ${fresh}` } }, signal);
-    }
-    throw error;
-  }
 }
 
 function sleep(ms: number): Promise<void> {
@@ -161,9 +136,11 @@ export const tvdbClient = {
   },
 };
 
-/** Test-only reset for the cached bearer token. */
+/**
+ * Test-only reset. TVDB auth now lives entirely in the `tvdb-proxy` Edge
+ * Function, so the client holds no token state to clear. Kept as a no-op so
+ * existing suites that call it keep working.
+ */
 export function __resetTvdbClientForTests(): void {
-  cachedToken = undefined;
-  tokenExpiresAt = 0;
-  loginInFlight = undefined;
+  // Intentionally empty — see docblock.
 }

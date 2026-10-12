@@ -1,4 +1,4 @@
-import { useMemo, useState } from 'react';
+import { useMemo, useRef, useState } from 'react';
 import { useRouter } from 'expo-router';
 import { ActivityIndicator, FlatList, Pressable, RefreshControl, StyleSheet, View, useWindowDimensions } from 'react-native';
 import { AppText } from '@/components/common/AppText';
@@ -31,11 +31,16 @@ export default function UpcomingScreen() {
   const anime = useUpcomingAnimePages(filter === 'all' || filter === 'anime');
   const queries = filter === 'movies' ? [movies] : filter === 'series' ? [series] : filter === 'anime' ? [anime] : [movies, series, anime];
 
+  const moviesData = movies.data;
+  const seriesData = series.data;
+  const animeData = anime.data;
+
   const items = useMemo(() => {
     const seen = new Set<string>();
     const merged: CatalogMedia[] = [];
-    for (const query of queries) {
-      for (const page of query.data?.pages ?? []) {
+    const sources = filter === 'movies' ? [moviesData] : filter === 'series' ? [seriesData] : filter === 'anime' ? [animeData] : [moviesData, seriesData, animeData];
+    for (const data of sources) {
+      for (const page of data?.pages ?? []) {
         for (const media of page.items) {
           if (seen.has(media.id)) continue;
           seen.add(media.id);
@@ -43,9 +48,12 @@ export default function UpcomingScreen() {
         }
       }
     }
-    // Oldest release date first; undated titles sink to the bottom.
+    // Oldest release date first; undated titles sink to the bottom. Sorted
+    // once per data change — new pages append at their sorted position, but
+    // the list remounts on filter change (key below) so mid-scroll reorders
+    // never yank the viewport.
     return merged.sort((a, b) => (a.releaseDate ?? '9999').localeCompare(b.releaseDate ?? '9999'));
-  }, [movies.data, series.data, anime.data, filter]); // eslint-disable-line react-hooks/exhaustive-deps
+  }, [moviesData, seriesData, animeData, filter]);
 
   const cardWidth = Math.max(120, Math.floor((Math.min(width, 760) - spacing.xl * 2 - spacing.md) / 2));
   const openMedia = (id: string) => router.push({ pathname: '/media/[id]', params: { id } });
@@ -53,11 +61,23 @@ export default function UpcomingScreen() {
   const failed = queries.every((query) => query.isError) && !items.length;
   const firstError = queries.map((query) => query.error).find((error) => error instanceof CatalogError);
   const fetchingMore = queries.some((query) => query.isFetchingNextPage);
+  const refetching = queries.some((query) => query.isRefetching && !query.isFetchingNextPage);
   const canLoadMore = queries.some((query) => query.hasNextPage);
+
+  // onEndReached fires repeatedly during fast flings — without a momentum
+  // guard it stacks page fetches, and each append + global re-sort yanks the
+  // viewport up/down. Only one paged fetch per fling.
+  const momentumGuard = useRef(true);
   const loadMore = () => {
+    if (momentumGuard.current) return;
+    momentumGuard.current = true;
     for (const query of queries) {
-      if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
+      if (query.hasNextPage && !query.isFetchingNextPage && !query.isFetching) void query.fetchNextPage();
     }
+  };
+
+  const refetchAll = () => {
+    for (const query of queries) void query.refetch();
   };
 
   return <Screen>
@@ -67,8 +87,9 @@ export default function UpcomingScreen() {
       return <Pressable key={option.value} accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={`Show upcoming ${option.label}`} onPress={() => { if (!selected) triggerLightHaptic(); setFilter(option.value); }} style={[styles.filter, selected && styles.filterActive]}><AppText variant="label" style={selected ? styles.filterTextActive : styles.filterText}>{option.label}</AppText></Pressable>;
     })}</View>
     {loading ? <FlatList data={[0, 1, 2, 3, 4, 5]} keyExtractor={(item) => String(item)} numColumns={2} columnWrapperStyle={styles.gridRow} contentContainerStyle={styles.grid} style={styles.flat} renderItem={() => <PosterSkeleton />} showsVerticalScrollIndicator={false} />
-      : failed ? <ErrorView message={firstError instanceof CatalogError ? firstError.userMessage : 'Could not load upcoming titles. Check your connection and try again.'} onRetry={() => { for (const query of queries) void query.refetch(); }} />
+      : failed ? <ErrorView message={firstError instanceof CatalogError ? firstError.userMessage : 'Could not load upcoming titles. Check your connection and try again.'} onRetry={refetchAll} />
       : items.length ? <FlatList
+        key={filter}
         data={items}
         keyExtractor={(item) => item.id}
         numColumns={2}
@@ -77,11 +98,14 @@ export default function UpcomingScreen() {
         style={styles.flat}
         showsVerticalScrollIndicator={false}
         initialNumToRender={10}
-        windowSize={7}
-        removeClippedSubviews
+        maxToRenderPerBatch={10}
+        updateCellsBatchingPeriod={50}
+        windowSize={11}
+        removeClippedSubviews={false}
+        onMomentumScrollBegin={() => { momentumGuard.current = false; }}
         onEndReached={loadMore}
-        onEndReachedThreshold={0.5}
-        refreshControl={<RefreshControl refreshing={fetchingMore} onRefresh={() => { for (const query of queries) void query.refetch(); }} tintColor={colors.accent} colors={[colors.accent]} />}
+        onEndReachedThreshold={0.4}
+        refreshControl={<RefreshControl refreshing={refetching} onRefresh={refetchAll} tintColor={colors.accent} colors={[colors.accent]} />}
         ListFooterComponent={fetchingMore ? <View style={styles.footer}><ActivityIndicator color={colors.accent} /><AppText variant="caption" muted>Loading more…</AppText></View> : !canLoadMore ? <AppText variant="caption" muted style={styles.end}>You have seen it all</AppText> : null}
         renderItem={({ item }) => <PosterCard title={item.title} subtitle={upcomingSubtitle(item)} posterUri={item.posterUrl} width={cardWidth} onPress={() => openMedia(mediaRouteId(item))} />}
       />

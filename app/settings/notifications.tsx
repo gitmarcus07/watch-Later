@@ -9,7 +9,7 @@ import { IconButton } from '@/components/buttons/IconButton';
 import { AppButton } from '@/components/buttons/AppButton';
 import { useNotificationStore } from '@/store/app/notificationStore';
 import { getReminderPermission, refreshReminders } from '@/features/notifications/scheduler';
-import { RELEASE_DAY_BODY, releaseDayTitle } from '@/features/notifications/upcomingReminders';
+import { RELEASE_DAY_BODY, refreshUpcomingReminders, releaseDayTitle, sendReleaseDayTestNotification } from '@/features/notifications/upcomingReminders';
 import { sendTestNotification } from '@/features/ott/ottReminders';
 import { watchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
 import { showDialog, showToast } from '@/components/feedback/AppDialog';
@@ -30,16 +30,16 @@ export default function NotificationsScreen() {
 
   const rows = [
     { label: 'Continue Watching reminders', detail: 'Nudge me about series I have in progress', value: continueWatchingReminders, key: 'continueWatchingReminders' as const },
-    { label: 'New release reminders', detail: 'Tell me when anticipated titles release', value: newReleaseReminders, key: 'newReleaseReminders' as const },
+    { label: 'New release reminders', detail: 'Tell me when anticipated titles release, including release-day alerts', value: newReleaseReminders, key: 'newReleaseReminders' as const },
   ];
 
   return <Screen scroll>
     <View style={styles.header}><IconButton name="arrow-back" label="Go back" onPress={() => router.back()} /><AppText variant="heading1">Notifications</AppText></View>
-    <SectionHeader title="Reminders" subtitle="Choose what you&apos;d like to hear about." />
+    <SectionHeader title="Reminders" subtitle="Choose what you'd like to hear about." />
     <View style={styles.card}>
       {rows.map((row) => <View key={row.key} style={styles.row}>
         <View style={styles.copy}><AppText variant="bodyMedium">{row.label}</AppText><AppText variant="caption" muted>{row.detail}</AppText></View>
-        <Switch accessibilityRole="switch" accessibilityLabel={row.label} accessibilityState={{ checked: row.value }} value={row.value} onValueChange={(value) => { setPreferences({ [row.key]: value }); void refreshReminders(); }} trackColor={{ true: colors.accent, false: colors.surfaceElevated }} thumbColor={colors.white} />
+        <Switch accessibilityRole="switch" accessibilityLabel={row.label} accessibilityState={{ checked: row.value }} value={row.value} onValueChange={(value) => { setPreferences({ [row.key]: value }); void refreshReminders(); void refreshUpcomingReminders(); }} trackColor={{ true: colors.accent, false: colors.surfaceElevated }} thumbColor={colors.white} />
       </View>)}
     </View>
     {permission === 'denied' ? <View style={styles.notice}><Ionicons name="information-circle-outline" size={19} color={colors.textSecondary} /><AppText variant="bodySmall" muted style={styles.noticeText}>Notifications are blocked in system settings, so reminders can&apos;t appear. Your preferences stay saved on this device.</AppText></View> : null}
@@ -48,21 +48,25 @@ export default function NotificationsScreen() {
       label="Send test notification"
       variant="secondary"
       onPress={() => {
-        // Preview the real release-day format (first interested title, else
-        // the spec sample) instead of diagnostic copy.
-        const preview = watchStateRepository.getInterested()
-          .then((entries) => {
-            const first = entries[0]?.media;
-            return first
-              ? { title: releaseDayTitle(first.title), body: RELEASE_DAY_BODY }
-              : { title: releaseDayTitle('Dune: Part Three'), body: RELEASE_DAY_BODY };
-          })
-          .catch(() => ({ title: releaseDayTitle('Dune: Part Three'), body: RELEASE_DAY_BODY }));
-        void preview.then((custom) => sendTestNotification(custom).then((result) => {
-          if (result === 'scheduled') showToast('Release preview arrives in ~10 seconds', 'success');
-          else if (result === 'denied') void showDialog({ type: 'warning', title: 'Notifications are blocked', message: 'Allow notifications in system settings, then try again.' });
-          else void showDialog({ type: 'error', title: 'Couldn’t schedule the test', message: 'Please try again.' });
-        }));
+        // Real release-day test when possible (first interested title carries
+        // the exact channel, sound, icon, and Move to ASAP button); otherwise
+        // fall back to the generic premiere preview.
+        void watchStateRepository.getInterested().then((entries) => {
+          const first = entries[0]?.media;
+          if (first) {
+            return sendReleaseDayTestNotification(first).then((result) => {
+              if (result === 'scheduled') showToast('Release-day test arrives in ~10 seconds — try the Move to ASAP button', 'success');
+              else if (result === 'denied') void showDialog({ type: 'warning', title: 'Notifications are blocked', message: 'Allow notifications in system settings, then try again.' });
+              else void showDialog({ type: 'error', title: 'Couldn’t schedule the test', message: 'Please try again.' });
+            });
+          }
+          const custom = { title: releaseDayTitle('Dune: Part Three'), body: RELEASE_DAY_BODY };
+          return sendTestNotification(custom).then((result) => {
+            if (result === 'scheduled') showToast('Release preview arrives in ~10 seconds', 'success');
+            else if (result === 'denied') void showDialog({ type: 'warning', title: 'Notifications are blocked', message: 'Allow notifications in system settings, then try again.' });
+            else void showDialog({ type: 'error', title: 'Couldn’t schedule the test', message: 'Please try again.' });
+          });
+        }).catch(() => undefined);
       }}
     />
   </Screen>;

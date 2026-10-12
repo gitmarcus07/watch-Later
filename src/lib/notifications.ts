@@ -27,13 +27,19 @@ const expoGoStub = {
     TIME_INTERVAL: 'timeInterval',
   },
   AndroidImportance: { MIN: 1, LOW: 2, DEFAULT: 3, HIGH: 4, MAX: 5 },
+  DEFAULT_ACTION_IDENTIFIER: 'expo.modules.notifications.actions.DEFAULT',
   setNotificationHandler: () => undefined,
   getPermissionsAsync: unavailable('getPermissionsAsync'),
   requestPermissionsAsync: unavailable('requestPermissionsAsync'),
   setNotificationChannelAsync: unavailable('setNotificationChannelAsync'),
+  setNotificationCategoryAsync: unavailable('setNotificationCategoryAsync'),
   cancelAllScheduledNotificationsAsync: unavailable('cancelAllScheduledNotificationsAsync'),
   cancelScheduledNotificationAsync: unavailable('cancelScheduledNotificationAsync'),
   scheduleNotificationAsync: unavailable('scheduleNotificationAsync'),
+  dismissNotificationAsync: unavailable('dismissNotificationAsync'),
+  dismissAllNotificationsAsync: unavailable('dismissAllNotificationsAsync'),
+  getAllScheduledNotificationsAsync: () => Promise.resolve([]),
+  addNotificationResponseReceivedListener: () => ({ remove: () => undefined }),
 } as unknown as NotificationsModule;
 
 let resolved: NotificationsModule;

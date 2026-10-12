@@ -139,7 +139,7 @@ function MarqueeRow({ uris, duration, reverse, opacity }: { uris: string[]; dura
 
 /* ───────────────────────────── screen ───────────────────────────── */
 
-export default function SplashScreen({ isReady = true, onFinish, minDuration = 6000 }: Props) {
+export default function SplashScreen({ isReady = true, onFinish, minDuration = 4000 }: Props) {
   const [minDone, setMinDone] = useState(false);
   // Bundled artwork paints instantly; cache + trending replace it when ready.
   const [posters, setPosters] = useState<string[]>(BUNDLED_POSTERS);
