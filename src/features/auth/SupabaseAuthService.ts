@@ -8,7 +8,7 @@ import { SqliteGuestMigrationService } from '@/data/local/repositories/SqliteGue
 import type { GuestMigrationService } from '@/data/local/repositories/GuestMigrationService';
 import type { AuthService } from './sessionService';
 
-interface AuthUser { id: string; email?: string; created_at?: string }
+interface AuthUser { id: string; email?: string; created_at?: string; identities?: unknown[] }
 interface AuthSession { user: AuthUser }
 interface AuthFailure { code?: string; message?: string }
 interface OAuthRedirectResult { type: string; url?: string }
@@ -70,7 +70,14 @@ export function isDeviceLinkedError(error: unknown): boolean {
 export type GoogleAuthMode = 'sign-in' | 'sign-up';
 
 export const NO_GOOGLE_ACCOUNT_MESSAGE =
-  'No account found with this Google email. Create a new account first, then sign in.';
+  'We couldn’t find an account for that Google email. Create a new account first, then sign in.';
+
+/** Shown when "create account" resolves to an email that already has an account. */
+export const EXISTING_ACCOUNT_NOTICE =
+  'This email already had an account, so you’ve been signed in instead.';
+
+/** Title for the "no account found" prompt on the auth screens. */
+export const NO_GOOGLE_ACCOUNT_TITLE = 'No account found';
 
 /** A user created within this window is treated as minted by the current OAuth flow. */
 export const NEW_OAUTH_USER_WINDOW_MS = 120_000;
@@ -91,6 +98,20 @@ export function isNewOAuthUser(
   const createdMs = Date.parse(createdAt);
   if (Number.isNaN(createdMs)) return false;
   return nowMs - createdMs >= 0 && nowMs - createdMs <= NEW_OAUTH_USER_WINDOW_MS;
+}
+
+/**
+ * True when Supabase handed back an account that already existed: the auth
+ * user was minted long before this flow, or the email resolved to an
+ * identity that already had a user attached. A genuinely fresh signup
+ * (missing timestamps, e.g. older mocked clients) falls through as false.
+ */
+export function isExistingAccountUser(user: { created_at?: string; identities?: unknown[] } | null | undefined): boolean {
+  if (!user) return false;
+  if (Array.isArray(user.identities) && user.identities.length === 0) return true;
+  const createdAt = user.created_at ? Date.parse(user.created_at) : Number.NaN;
+  if (Number.isNaN(createdAt)) return false;
+  return Date.now() - createdAt > NEW_OAUTH_USER_WINDOW_MS;
 }
 
 async function setPendingGoogleMode(mode: GoogleAuthMode): Promise<void> {
@@ -119,7 +140,7 @@ export async function consumePendingGoogleMode(): Promise<GoogleAuthMode> {
 function friendlyAuthError(error: AuthFailure | null, mode: 'sign-in' | 'sign-up'): AppError {
   const code = error?.code ?? '';
   if (code.includes('invalid_credentials') || error?.message?.toLowerCase().includes('invalid login')) return new AppError('authentication', 'Email or password is incorrect.');
-  if (code.includes('already_registered') || error?.message?.toLowerCase().includes('already registered')) return new AppError('authentication', 'An account with this email already exists. Try signing in.');
+  if (code.includes('already_registered') || code.includes('user_already_exists') || error?.message?.toLowerCase().includes('already registered')) return new AppError('authentication', 'This email already has an account. Sign in instead of creating one.');
   if (code.includes('weak_password') || error?.message?.toLowerCase().includes('password')) return new AppError('authentication', 'Choose a stronger password and try again.');
   if (error?.message?.toLowerCase().includes('network')) return new AppError('network', 'Could not reach the account service. Check your connection.');
   return new AppError('authentication', mode === 'sign-in' ? 'Unable to sign in. Please try again.' : 'Unable to create your account. Please try again.');
@@ -332,10 +353,19 @@ export class SupabaseAuthService implements AuthService {
     const { data, error } = await this.requireClient().auth.signUp({ email, password });
     if (error || !data.user) throw friendlyAuthError(error, 'sign-up');
     if (!data.session) throw new AppError('authentication', 'Check your email to confirm your account, then sign in. Your local library is unchanged.');
-    // Email sign-up only reaches here for a brand-new user.
-    await this.connectAccountAllowingFreshRebind(data.user.id, true, data.user.email ?? email);
+    // Supabase can hand back a live session for an email that ALREADY has an
+    // account (same password). That is a sign-in, not a new account — it must
+    // never be presented as a fresh signup, and the local library must not be
+    // re-migrated onto it as if it were brand new.
+    const existing = isExistingAccountUser(data.user);
+    await this.connectAccountAllowingFreshRebind(data.user.id, !existing, data.user.email ?? email);
     await this.markAuthSuccess();
-    return { mode: 'authenticated', userId: data.user.id, email: data.user.email ?? email };
+    return {
+      mode: 'authenticated',
+      userId: data.user.id,
+      email: data.user.email ?? email,
+      ...(existing ? { notice: EXISTING_ACCOUNT_NOTICE } : {}),
+    };
   }
 
   /**
@@ -504,7 +534,17 @@ export class SupabaseAuthService implements AuthService {
   private async authenticatedSession(mode: GoogleAuthMode = 'sign-up'): Promise<SessionState> {
     const client = this.requireClient();
     const user = (await client.auth.getUser?.())?.data.user;
-    if (!user) throw new AppError('authentication', 'Google sign-in did not return an account. Please try again.');
+    if (!user) {
+      // No live account on this device. For a sign-in that is exactly the
+      // "no account found" case (e.g. right after the account was deleted):
+      // clear any leftover session and report it as such instead of a generic
+      // "did not return an account, try again" dead end.
+      if (mode === 'sign-in') {
+        await this.rollbackAutoCreatedUser();
+        throw new AppError('authentication', NO_GOOGLE_ACCOUNT_MESSAGE);
+      }
+      throw new AppError('authentication', 'Google sign-in did not return an account. Please try again.');
+    }
     // Sign-in must never adopt an account this flow just created (e.g. the
     // same Google email right after account deletion). Check before the local
     // library is bound so nothing is migrated onto the husk.

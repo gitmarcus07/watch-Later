@@ -8,12 +8,13 @@ import { AppButton } from '@/components/buttons/AppButton';
 import { IconButton } from '@/components/buttons/IconButton';
 import { Screen } from '@/components/common/Screen';
 import { AuthGradientBackground } from '@/components/auth/AuthGradientBackground';
-import { showDialog } from '@/components/feedback/AppDialog';
-import { DeviceLinkedError, NO_GOOGLE_ACCOUNT_MESSAGE, SupabaseAuthService, isDeviceLinkedError } from './SupabaseAuthService';
+import { showDialog, showToast } from '@/components/feedback/AppDialog';
+import { DeviceLinkedError, NO_GOOGLE_ACCOUNT_MESSAGE, NO_GOOGLE_ACCOUNT_TITLE, SupabaseAuthService, isDeviceLinkedError } from './SupabaseAuthService';
 import type { SessionState } from '@/domain/models/session';
 import { scheduleAutoSync } from '@/features/sync/autoSync';
 import { persistSession } from '@/store/app/sessionPersistence';
 import { useSessionStore } from '@/store/app/sessionStore';
+import { useSyncStore } from '@/store/app/syncStore';
 import { colors, radius, spacing } from '@/theme';
 
 const authService = new SupabaseAuthService();
@@ -43,7 +44,11 @@ export function AuthForm({ mode }: { mode: Mode }) {
   async function finishAuth(session: SessionState) {
     await persistSession(session, true);
     setSession(session); setOnboardingComplete(true);
+    // A fresh session starts from a clean sync slate — a previous account's
+    // "needs attention"/"offline" status must not bleed into this one.
+    useSyncStore.getState().reset();
     if (session.mode === 'authenticated') scheduleAutoSync('auth');
+    if (session.mode === 'authenticated' && session.notice) showToast(session.notice, 'info');
     router.replace('/(tabs)');
   }
 
@@ -124,6 +129,28 @@ export function AuthForm({ mode }: { mode: Mode }) {
     } catch { void showDialog({ type: 'error', title: 'Guest mode unavailable', message: 'Your local library is safe. Please try again.' }); }
   }
 
+  /**
+   * Google failures surface as prompts, never as a bottom toast or a line of
+   * red text: "no account found" offers to create one on the spot, everything
+   * else explains itself in a dialog. Cancelling stays silent.
+   */
+  async function reportGoogleFailure(cause: unknown) {
+    const message = cause instanceof Error ? cause.message : 'Google sign-in failed. Please try again.';
+    if (message === 'Google sign-in was cancelled.') return;
+    if (message === NO_GOOGLE_ACCOUNT_MESSAGE) {
+      const create = await showDialog({
+        type: 'warning',
+        title: NO_GOOGLE_ACCOUNT_TITLE,
+        message: NO_GOOGLE_ACCOUNT_MESSAGE,
+        primaryAction: { label: 'Create account' },
+        secondaryAction: { label: 'Cancel' },
+      });
+      if (create) router.replace('/(auth)/create-account');
+      return;
+    }
+    void showDialog({ type: 'error', title: 'Google sign-in failed', message });
+  }
+
   async function continueWithGoogle() {
     if (googleLoading || loading) return;
     setGoogleLoading(true); setError('');
@@ -138,18 +165,18 @@ export function AuthForm({ mode }: { mode: Mode }) {
         try {
           if (await offerLinkedResetAndContinue(cause)) return;
         } catch (retryCause) {
-          setError(retryCause instanceof Error ? retryCause.message : 'Google sign-in failed. Please try again.');
+          await reportGoogleFailure(retryCause);
           return;
         }
       } else if (isDeviceLinkedError(cause)) {
         try {
           if (await offerLinkedResetAndRetry(attempt)) return;
         } catch (retryCause) {
-          setError(retryCause instanceof Error ? retryCause.message : 'Google sign-in failed. Please try again.');
+          await reportGoogleFailure(retryCause);
           return;
         }
       }
-      setError(cause instanceof Error ? cause.message : 'Google sign-in failed. Please try again.');
+      await reportGoogleFailure(cause);
     } finally { setGoogleLoading(false); }
   }
 
@@ -192,11 +219,6 @@ export function AuthForm({ mode }: { mode: Mode }) {
       ) : null}
     </View>
     {error ? <AppText accessibilityRole="alert" style={styles.error}>{error}</AppText> : null}
-    {!isSignUp && error === NO_GOOGLE_ACCOUNT_MESSAGE ? (
-      <Pressable accessibilityRole="button" accessibilityLabel="Create a new account" onPress={() => router.replace('/(auth)/create-account')} style={styles.guest}>
-        <Ionicons name="person-add-outline" size={15} color={colors.accent} /><AppText variant="bodySmall" style={styles.link}>Create new account</AppText>
-      </Pressable>
-    ) : null}
     <Animated.View entering={FadeInDown.delay(560).duration(550)} style={styles.actions}>
       <AppButton label={isSignUp ? 'Create account' : 'Sign in'} onPress={() => void submit()} loading={loading} disabled={loading || googleLoading} variant="secondary" icon={<Ionicons name={isSignUp ? 'person-add-outline' : 'log-in-outline'} size={18} color={colors.textPrimary} />} />
       <Pressable accessibilityRole="button" onPress={() => router.replace(isSignUp ? '/(auth)/login' : '/(auth)/create-account')} style={styles.switch}><AppText variant="bodySmall" muted>{isSignUp ? 'Already have an account? ' : 'New to Watch Later? '}<AppText variant="bodySmall" style={styles.link}>{isSignUp ? 'Sign in' : 'Create account'}</AppText></AppText></Pressable>

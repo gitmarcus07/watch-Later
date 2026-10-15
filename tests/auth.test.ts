@@ -1,4 +1,4 @@
-import { SupabaseAuthService, parseOAuthRedirect, resolveOAuthRedirectUri } from '@/features/auth/SupabaseAuthService';
+import { SupabaseAuthService, isExistingAccountUser, parseOAuthRedirect, resolveOAuthRedirectUri } from '@/features/auth/SupabaseAuthService';
 import type { GuestMigrationService } from '@/data/local/repositories/GuestMigrationService';
 
 const user = { id: 'user-123', email: 'viewer@example.test' };
@@ -193,5 +193,69 @@ describe('Google sign-in flow', () => {
     client.auth.signInWithOAuth.mockResolvedValue({ data: { url: null }, error: null });
     const service = new SupabaseAuthService(client, migration(), oauthDeps({ type: 'success', url: '' }));
     await expect(service.signInWithGoogle()).rejects.toThrow('Unable to sign in');
+  });
+});
+
+describe('create account with an email that already exists', () => {
+  const dayAgo = new Date(Date.now() - 86_400_000).toISOString();
+
+  it('signs the user in and says so instead of pretending a new account was made', async () => {
+    const client = authClient();
+    client.auth.signUp.mockResolvedValue({ data: { user: { ...user, created_at: dayAgo }, session }, error: null });
+    await expect(new SupabaseAuthService(client, migration()).createAccount('viewer@example.test', 'test-password'))
+      .resolves.toMatchObject({ mode: 'authenticated', userId: user.id, notice: expect.stringContaining('signed in') });
+  });
+
+  it('flags an email that resolved to an existing identity', async () => {
+    const client = authClient();
+    client.auth.signUp.mockResolvedValue({ data: { user: { ...user, identities: [] }, session }, error: null });
+    await expect(new SupabaseAuthService(client, migration()).createAccount('viewer@example.test', 'test-password'))
+      .resolves.toMatchObject({ notice: expect.any(String) });
+  });
+
+  it('keeps a genuinely fresh signup free of notices', async () => {
+    await expect(new SupabaseAuthService(authClient(), migration()).createAccount('viewer@example.test', 'test-password'))
+      .resolves.toEqual({ mode: 'authenticated', userId: user.id, email: user.email });
+  });
+
+  it('maps the newer already-registered error code to a sign-in nudge', async () => {
+    const client = authClient();
+    client.auth.signUp.mockResolvedValue({ data: { user: null, session: null }, error: { code: 'user_already_exists', message: 'raw diagnostic' } });
+    await expect(new SupabaseAuthService(client, migration()).createAccount('viewer@example.test', 'test-password')).rejects.toThrow('Sign in instead');
+  });
+
+  it('recognises existing accounts by age and by identity resolution', () => {
+    expect(isExistingAccountUser({ id: 'u', created_at: dayAgo })).toBe(true);
+    expect(isExistingAccountUser({ id: 'u', identities: [] })).toBe(true);
+    expect(isExistingAccountUser({ id: 'u', created_at: new Date().toISOString() })).toBe(false);
+    expect(isExistingAccountUser({ id: 'u' })).toBe(false);
+    expect(isExistingAccountUser(null)).toBe(false);
+  });
+});
+
+describe('Google sign-in with no live account', () => {
+  function noAccountClient() {
+    return {
+      auth: {
+        ...authClient().auth,
+        signInWithOAuth: jest.fn().mockResolvedValue({ data: { url: 'https://accounts.google.test/o/oauth2/auth' }, error: null }),
+        exchangeCodeForSession: jest.fn().mockResolvedValue({ error: null }),
+        getUser: jest.fn().mockResolvedValue({ data: { user: null } }),
+      },
+    };
+  }
+
+  it('turns a sign-in without an account into the "no account found" prompt', async () => {
+    const deps = { redirectUri: 'watchlater://auth/callback', browser: { openAuthSessionAsync: jest.fn().mockResolvedValue({ type: 'success', url: 'watchlater://auth/callback?code=abc123' }) } };
+    const service = new SupabaseAuthService(noAccountClient(), migration(), deps);
+    await expect(service.signInWithGoogle('sign-in')).rejects.toThrow('couldn’t find an account');
+  });
+
+  it('rolls the orphaned session back so nothing lingers on the device', async () => {
+    const client = noAccountClient();
+    const deps = { redirectUri: 'watchlater://auth/callback', browser: { openAuthSessionAsync: jest.fn().mockResolvedValue({ type: 'success', url: 'watchlater://auth/callback?code=abc123' }) } };
+    const service = new SupabaseAuthService(client, migration(), deps);
+    await expect(service.signInWithGoogle('sign-in')).rejects.toThrow('couldn’t find an account');
+    expect(client.auth.signOut).toHaveBeenCalled();
   });
 });

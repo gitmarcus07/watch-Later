@@ -14,6 +14,26 @@ function parseArray<T>(value: Json, fallback: T[]): T[] {
   return Array.isArray(value) ? value as unknown as T[] : fallback;
 }
 
+interface CloudFailure { code?: string; message?: string; status?: number }
+
+/**
+ * Maps a PostgREST failure onto an AppError the UI can act on. Only genuine
+ * connectivity failures may read as "offline" — permission (RLS) and missing
+ * schema problems must never masquerade as "no network", because the user
+ * would keep retrying an operation that can never succeed.
+ */
+function cloudError(failure: CloudFailure | null | undefined, fallbackMessage: string): AppError {
+  const code = String(failure?.code ?? '');
+  const status = failure?.status;
+  if (code === '42501' || code === 'PGRST301' || status === 401 || status === 403) {
+    return new AppError('authentication', 'Your account isn’t allowed to sync this data. Sign out, then sign in again.');
+  }
+  if (code === '42P01' || code === 'PGRST202' || status === 404) {
+    return new AppError('configuration', 'Cloud sync isn’t ready for this account yet. Your library stays safe on this device.');
+  }
+  return new AppError('network', fallbackMessage);
+}
+
 export class SupabaseWatchStateRepository implements CloudWatchStateRepository {
   async getAuthenticatedUserId(): Promise<string | undefined> {
     const { data, error } = await client().auth.getSession();
@@ -34,7 +54,8 @@ export class SupabaseWatchStateRepository implements CloudWatchStateRepository {
       supabaseClient.from('interested_marks').select('*').eq('user_id', userId),
     ]);
     if (mediaResult.error || watchlistResult.error || movieResult.error || seriesResult.error || episodeResult.error || favoriteResult.error || ratingResult.error || interestedResult.error) {
-      throw new AppError('network', 'Could not download your synced library. Your local data is safe.');
+      const firstError = mediaResult.error ?? watchlistResult.error ?? movieResult.error ?? seriesResult.error ?? episodeResult.error ?? favoriteResult.error ?? ratingResult.error ?? interestedResult.error;
+      throw cloudError(firstError, 'Could not download your synced library. Your local data is safe.');
     }
     const mediaRows = mediaResult.data;
     const mediaByIdentity = new Map<string, CatalogMedia>();
@@ -115,7 +136,7 @@ export class SupabaseWatchStateRepository implements CloudWatchStateRepository {
       episode_metadata: media.episodeMetadata, updated_at: new Date().toISOString(),
     }));
     const { error: mediaError } = await supabaseClient.from('library_media').upsert(mediaRows, { onConflict: 'user_id,provider,media_type,provider_id' });
-    if (mediaError) throw new AppError('network', 'Could not sync your saved titles. Your local changes are safe.');
+    if (mediaError) throw cloudError(mediaError, 'Could not sync your saved titles. Your local changes are safe.');
 
     const groups = {
       watchlist: changes.filter(({ entityType }) => entityType === 'watchlist').map((change) => ({ user_id: userId, provider: change.provider, media_type: change.mediaType, provider_id: change.providerId, added_at: change.watchedAt ?? change.updatedAt, position: change.position ?? 0, priority: change.priority ?? null, is_deleted: change.deleted, updated_at: change.updatedAt })),
@@ -136,7 +157,8 @@ export class SupabaseWatchStateRepository implements CloudWatchStateRepository {
       groups.interested.length ? supabaseClient.from('interested_marks').upsert(groups.interested, { onConflict: 'user_id,provider,media_type,provider_id' }) : Promise.resolve({ error: null }),
     ];
     const results = await Promise.all(writes);
-    if (results.some(({ error }) => error)) throw new AppError('network', 'Could not sync your latest changes. They will retry later.');
+    const failedWrite = results.find(({ error }) => error);
+    if (failedWrite?.error) throw cloudError(failedWrite.error, 'Could not sync your latest changes. They will retry later.');
   }
 }
 

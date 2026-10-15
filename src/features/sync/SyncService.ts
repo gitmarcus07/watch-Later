@@ -44,7 +44,12 @@ export class SyncService {
     let pending: PendingWatchStateChange[] = [];
     try {
       const authenticatedUserId = await this.cloud.getAuthenticatedUserId();
-      if (!authenticatedUserId || authenticatedUserId !== userId) throw new AppError('authentication', 'Sign in again to sync this library.');
+      // Missing session and mismatched account are different problems: the
+      // first means the token is gone (expired, revoked, or signed out), the
+      // second means this library belongs to someone else. Both are only
+      // solvable by signing in again.
+      if (!authenticatedUserId) throw new AppError('authentication', 'Your session has ended. Sign in again to sync your library.');
+      if (authenticatedUserId !== userId) throw new AppError('authentication', 'Sign in again to sync this library.');
       await this.local.bindAccount(userId);
       pending = await this.local.getPendingChanges();
       const remote = await this.cloud.fetch(userId);

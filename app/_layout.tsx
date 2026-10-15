@@ -12,6 +12,7 @@ import { colors } from "@/theme";
 import { logger } from "@/lib/logger";
 import { hydrateSession, persistSession } from "@/store/app/sessionPersistence";
 import { useSessionStore } from "@/store/app/sessionStore";
+import { useSyncStore } from "@/store/app/syncStore";
 import { useAppearanceStore } from "@/store/app/appearanceStore";
 import { useNotificationStore } from "@/store/app/notificationStore";
 import { useRatingSettings } from "@/store/app/ratingSettings";
@@ -96,6 +97,9 @@ export default function RootLayout() {
                 const current = useSessionStore.getState();
                 current.setSession(authenticated);
                 await persistSession(authenticated, current.onboardingComplete);
+                // A new sign-in starts from a clean sync slate; the previous
+                // account's "needs attention"/"offline" status must not linger.
+                useSyncStore.getState().reset();
                 if (
                   event === "SIGNED_IN" ||
                   event === "INITIAL_SESSION" ||
@@ -103,15 +107,13 @@ export default function RootLayout() {
                 )
                   scheduleAutoSync("auth");
               })
-              .catch(async () => {
-                await authClient.auth.signOut();
-                const current = useSessionStore.getState();
-                const guest = {
-                  mode: "guest" as const,
-                  userId: `guest-${Date.now()}`,
-                };
-                current.setSession(guest);
-                await persistSession(guest, current.onboardingComplete);
+              .catch((error: unknown) => {
+                // Never force a sign-out here. The auth screens own device-link
+                // recovery ("Clear & continue") with the session kept alive;
+                // ripping the session out from under them leaves the app
+                // showing an account with no live Supabase session — which sync
+                // then reports as "Sign in again to sync this library".
+                logger.error("Account binding failed during auth event", error);
               });
           }, 0);
         } else if (
@@ -124,6 +126,7 @@ export default function RootLayout() {
             userId: `guest-${Date.now()}`,
           };
           current.setSession(guest);
+          useSyncStore.getState().reset();
           void persistSession(guest, current.onboardingComplete);
         }
       },

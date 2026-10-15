@@ -90,4 +90,10 @@ describe('local-first synchronization', () => {
     expect(local.bindAccount).not.toHaveBeenCalled();
     expect(cloud.fetch).not.toHaveBeenCalled();
   });
+
+  it('reports a missing session as an ended session, not a mismatched account', async () => {
+    const { service, cloud } = setup([change()], []);
+    cloud.getAuthenticatedUserId.mockResolvedValue(undefined);
+    await expect(service.sync('account-1')).rejects.toThrow('Your session has ended');
+  });
 });
