@@ -4,6 +4,7 @@ import { ActivityIndicator, FlatList, Pressable, RefreshControl, StyleSheet, Vie
 import { AppText } from '@/components/common/AppText';
 import { Screen } from '@/components/common/Screen';
 import { FadeInView } from '@/components/common/FadeInView';
+import { IconButton } from '@/components/buttons/IconButton';
 import { EmptyState, ErrorView, PosterSkeleton } from '@/components/feedback/FeedbackViews';
 import { PosterCard } from '@/components/media/PosterCard';
 import type { CatalogMedia } from '@/domain/models/media';
@@ -81,7 +82,7 @@ export default function UpcomingScreen() {
   };
 
   return <Screen>
-    <FadeInView><View style={styles.header}><View style={styles.title}><AppText variant="heading1">Upcoming</AppText></View></View></FadeInView>
+    <FadeInView><View style={styles.header}><IconButton name="arrow-back" label="Go back" onPress={() => (router.canGoBack() ? router.back() : router.replace('/'))} /><View style={styles.title}><AppText variant="heading1">Upcoming</AppText></View></View></FadeInView>
     <View style={styles.filters}>{FILTERS.map((option) => {
       const selected = option.value === filter;
       return <Pressable key={option.value} accessibilityRole="button" accessibilityState={{ selected }} accessibilityLabel={`Show upcoming ${option.label}`} onPress={() => { if (!selected) triggerLightHaptic(); setFilter(option.value); }} style={[styles.filter, selected && styles.filterActive]}><AppText variant="label" style={selected ? styles.filterTextActive : styles.filterText}>{option.label}</AppText></Pressable>;
@@ -114,8 +115,8 @@ export default function UpcomingScreen() {
 }
 
 const styles = StyleSheet.create({
-  header: { paddingTop: spacing.lg, paddingBottom: spacing.md },
-  title: { gap: spacing.xs },
+  header: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingTop: spacing.lg, paddingBottom: spacing.md },
+  title: { flex: 1, gap: spacing.xs },
   filters: { flexDirection: 'row', gap: spacing.sm, paddingVertical: spacing.md },
   filter: { flex: 1, alignItems: 'center', paddingVertical: spacing.md, borderRadius: radius.pill, backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border },
   filterActive: { backgroundColor: colors.accent, borderColor: colors.accent },

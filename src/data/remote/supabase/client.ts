@@ -58,3 +58,22 @@ export const supabase =
         },
       })
     : null;
+
+/**
+ * AsyncStorage key prefix supabase-js uses to persist the session, the user,
+ * and every PKCE verifier slot — all of which begin
+ * `sb-<project-ref>-auth-token`. This client relies on supabase-js's default
+ * derivation, so account deletion can sweep every key under that prefix and
+ * wipe them directly. That matters because once the auth user is gone
+ * server-side its refresh token is dead, and `signOut()` bails out on that
+ * error *before* touching storage — which is precisely what left a deleted
+ * account's session behind to sign the user back in on next launch.
+ */
+export function supabaseAuthStoragePrefix(): string | null {
+  if (!url) return null;
+  try {
+    return `sb-${new URL(url).hostname.split('.')[0]}-auth-token`;
+  } catch {
+    return null;
+  }
+}

@@ -31,7 +31,7 @@ export default function Top100Screen() {
   const refetch = () => { void Promise.all([moviesQuery.refetch(), seriesQuery.refetch()]); };
 
   return <Screen>
-    <FadeInView><View style={styles.header}><IconButton name="arrow-back" label="Go back" onPress={() => router.back()} /><View style={styles.title}><AppText variant="heading1">Top 100</AppText><AppText variant="bodySmall" muted>{items.length ? `${items.length} highest-rated movies & series · IMDb` : 'The highest-rated movies & series'}</AppText></View></View></FadeInView>
+    <FadeInView><View style={styles.header}><IconButton name="arrow-back" label="Go back" onPress={() => router.back()} /><View style={styles.title}><AppText variant="heading1">Top 100</AppText></View></View></FadeInView>
     {loading ? <FlatList data={[0, 1, 2, 3, 4, 5]} keyExtractor={(item) => String(item)} numColumns={2} columnWrapperStyle={styles.gridRow} contentContainerStyle={styles.grid} style={styles.flat} renderItem={() => <PosterSkeleton />} showsVerticalScrollIndicator={false} />
       : failed ? <ErrorView message="Could not load the top 100. Check your connection and try again." onRetry={refetch} />
       : items.length ? <FlatList
@@ -49,7 +49,6 @@ export default function Top100Screen() {
         renderItem={({ item, index }) => <PosterCard title={item.title} subtitle={subtitleFor(item)} posterUri={item.posterUrl} badge={`#${index + 1}`} width={cardWidth} onPress={() => openMedia(item)} />}
       />
       : <EmptyState icon="trophy-outline" title="Top 100 not published yet" message="The weekly IMDb snapshot has not been generated yet. Check back soon." />}
-    <View style={styles.footnote}><AppText variant="caption" muted style={styles.footnoteText}>One mixed ranking from IMDb ratings — not box-office or viewership figures.</AppText></View>
   </Screen>;
 }
 
@@ -59,6 +58,4 @@ const styles = StyleSheet.create({
   flat: { flex: 1 },
   grid: { paddingBottom: spacing['2xl'], gap: spacing.md },
   gridRow: { gap: spacing.md },
-  footnote: { paddingVertical: spacing.md },
-  footnoteText: { textAlign: 'center', lineHeight: 18 },
 });

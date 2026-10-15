@@ -1,7 +1,7 @@
 import type { SQLiteDatabase } from 'expo-sqlite';
 import { AppError } from '@/domain/errors/AppError';
 
-export const DATABASE_VERSION = 16;
+export const DATABASE_VERSION = 17;
 
 const migrations: Record<number, readonly string[]> = {
   1: [
@@ -273,7 +273,51 @@ const migrations: Record<number, readonly string[]> = {
       updated_at TEXT NOT NULL DEFAULT CURRENT_TIMESTAMP
     );`,
   ],
+  // Watchlist and Watched are mutually exclusive: a title you have finished is
+  // no longer "to watch". Data written before that rule existed can hold both
+  // rows at once; this pass drops the watchlist half and queues the matching
+  // cloud tombstone so the two libraries stay in step. Rows are rewritten in
+  // TypeScript below because the queued payload carries a JSON media snapshot.
+  17: [],
 };
+
+/** Columns the v17 overlap purge reads from `tracked_media`. */
+interface WatchedOverlapRow {
+  id: string;
+  provider: 'tmdb' | 'anilist' | 'tvdb';
+  provider_id: string;
+  media_type: 'movie' | 'series' | 'anime';
+  title: string;
+  original_title: string | null;
+  overview: string | null;
+  poster_url: string | null;
+  backdrop_url: string | null;
+  release_date: string | null;
+  year: number | null;
+  genres: string;
+  number_of_seasons: number | null;
+  number_of_episodes: number | null;
+  season_summaries: string;
+  episode_metadata: 'available' | 'unavailable';
+}
+
+function parseJsonColumn<T>(value: string | null, fallback: T): T {
+  try { return JSON.parse(value ?? '') as T; } catch { return fallback; }
+}
+
+/** Same shape the sync layer queues for a watchlist row, built without SQL/JSON1. */
+function librarySnapshot(row: WatchedOverlapRow): Record<string, unknown> {
+  return {
+    id: row.id, provider: row.provider, providerId: row.provider_id, mediaType: row.media_type,
+    title: row.title, originalTitle: row.original_title ?? undefined, overview: row.overview ?? undefined,
+    posterUrl: row.poster_url ?? undefined, backdropUrl: row.backdrop_url ?? undefined,
+    releaseDate: row.release_date ?? undefined, year: row.year ?? undefined,
+    genres: parseJsonColumn<unknown[]>(row.genres, []),
+    numberOfSeasons: row.number_of_seasons ?? undefined, numberOfEpisodes: row.number_of_episodes ?? undefined,
+    seasonSummaries: parseJsonColumn<unknown[]>(row.season_summaries, []),
+    episodeMetadata: row.episode_metadata,
+  };
+}
 
 async function ensureTrackedMediaColumns(database: SQLiteDatabase): Promise<void> {
   const columns = await database.getAllAsync<{ name: string }>('PRAGMA table_info(tracked_media)');
@@ -546,6 +590,46 @@ async function rebuildSyncQueueProviders(database: SQLiteDatabase): Promise<void
   await rebuildSyncQueueEntities(database, ['watchlist', 'movie', 'series', 'episode', 'favorite', 'rating', 'interested']);
 }
 
+/**
+ * v17: a finished title leaves the Watchlist. Older builds allowed a movie or
+ * a completed series to hold a watchlist row and a watched record at the same
+ * time, which showed up in both tabs. Watched wins here: the row is dropped and
+ * a watchlist tombstone is queued so the cloud copy is removed on the next sync.
+ */
+async function purgeWatchedFromWatchlist(database: SQLiteDatabase): Promise<void> {
+  // Synthetic/legacy databases can predate the watch-state tables entirely;
+  // there is nothing to purge when they are absent.
+  const required = ['watchlist_entries', 'tracked_media', 'movie_watches', 'tracked_series', 'tracked_episodes'];
+  const tables = await database.getAllAsync<{ name: string }>(
+    `SELECT name FROM sqlite_master WHERE type = 'table' AND name IN (${required.map(() => '?').join(', ')})`,
+    ...required,
+  );
+  if (tables.length < required.length) return;
+  const rows = await database.getAllAsync<WatchedOverlapRow>(
+    `SELECT m.* FROM watchlist_entries w
+     JOIN tracked_media m ON m.id = w.media_id
+     WHERE EXISTS (SELECT 1 FROM movie_watches mw WHERE mw.media_id = m.id)
+        OR EXISTS (SELECT 1 FROM tracked_series ts WHERE ts.media_id = m.id AND ts.completed = 1)
+        OR (m.number_of_episodes > 0
+          AND EXISTS (SELECT 1 FROM tracked_series ts WHERE ts.media_id = m.id)
+          AND (SELECT COUNT(*) FROM tracked_episodes e WHERE e.series_id = m.id AND e.watched_at IS NOT NULL) >= m.number_of_episodes)`,
+  );
+  if (!rows.length) return;
+  const updatedAt = new Date().toISOString();
+  for (const row of rows) {
+    const media = librarySnapshot(row);
+    const payload = JSON.stringify({ media });
+    await database.runAsync(
+      `INSERT INTO sync_queue (entity_type, entity_key, provider, media_type, provider_id, is_deleted, updated_at, payload, media_json, rewatch_count, position)
+       VALUES ('watchlist', ?, ?, ?, ?, 1, ?, ?, ?, 0, 0)
+       ON CONFLICT(entity_type, entity_key) DO UPDATE SET is_deleted = 1, updated_at = excluded.updated_at,
+        payload = excluded.payload, media_json = excluded.media_json, last_error = NULL`,
+      row.id, row.provider, row.media_type, row.provider_id, updatedAt, payload, payload,
+    );
+    await database.runAsync('DELETE FROM watchlist_entries WHERE media_id = ?', row.id);
+  }
+}
+
 async function rebuildTrackedEpisodesProviders(database: SQLiteDatabase): Promise<void> {
   const tables = await database.getAllAsync<{ name: string }>(
     "SELECT name FROM sqlite_master WHERE type = 'table' AND name = 'tracked_episodes'",
@@ -623,6 +707,8 @@ export async function runMigrations(database: SQLiteDatabase): Promise<void> {
           for (const statement of statements) await transaction.execAsync(statement);
         } else if (version === 14) {
           await rebuildTrackedEpisodesForAnime(transaction);
+        } else if (version === 17) {
+          await purgeWatchedFromWatchlist(transaction);
         } else {
           for (const statement of statements) await transaction.execAsync(statement);
         }

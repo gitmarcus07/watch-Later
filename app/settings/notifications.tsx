@@ -17,7 +17,6 @@ import { colors, radius, spacing } from '@/theme';
 
 export default function NotificationsScreen() {
   const router = useRouter();
-  const continueWatchingReminders = useNotificationStore((state) => state.continueWatchingReminders);
   const newReleaseReminders = useNotificationStore((state) => state.newReleaseReminders);
   const setPreferences = useNotificationStore((state) => state.setPreferences);
   const [permission, setPermission] = useState<'granted' | 'denied' | 'undetermined'>('undetermined');
@@ -29,13 +28,12 @@ export default function NotificationsScreen() {
   }, []));
 
   const rows = [
-    { label: 'Continue Watching reminders', detail: 'Nudge me about series I have in progress', value: continueWatchingReminders, key: 'continueWatchingReminders' as const },
-    { label: 'New release reminders', detail: 'Tell me when anticipated titles release, including release-day alerts', value: newReleaseReminders, key: 'newReleaseReminders' as const },
+    { label: 'Upcoming releases', detail: 'Alert me when a show I follow drops a new episode and when titles on my list come out', value: newReleaseReminders, key: 'newReleaseReminders' as const },
   ];
 
   return <Screen scroll>
     <View style={styles.header}><IconButton name="arrow-back" label="Go back" onPress={() => router.back()} /><AppText variant="heading1">Notifications</AppText></View>
-    <SectionHeader title="Reminders" subtitle="Choose what you'd like to hear about." />
+    <SectionHeader title="Upcoming" subtitle="The only alerts Watch Later sends." />
     <View style={styles.card}>
       {rows.map((row) => <View key={row.key} style={styles.row}>
         <View style={styles.copy}><AppText variant="bodyMedium">{row.label}</AppText><AppText variant="caption" muted>{row.detail}</AppText></View>

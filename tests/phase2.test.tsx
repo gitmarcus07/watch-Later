@@ -151,25 +151,40 @@ describe('trash and restore', () => {
   it('snapshots removals, restores them, and purges after thirty days', async () => {
     const { adapter, ready } = setupRepository();
     const repository = await ready;
-    const title = movie(221);
-    await repository.addToWatchlist(title);
-    await repository.markMovieWatched(title, true);
-    await repository.setFavorite(title, true);
-    await repository.removeFromWatchlist(title);
+    const listed = movie(221);
+    const watchedTitle = movie(223);
+    await repository.addToWatchlist(listed);
+    await repository.removeFromWatchlist(listed);
     let trash = await repository.getTrash();
     expect(trash.map((item) => item.kind)).toEqual(['watchlist']);
     await repository.restoreTrashItem(trash[0].id);
-    expect(await repository.isInWatchlist(title)).toBe(true);
+    expect(await repository.isInWatchlist(listed)).toBe(true);
     expect(await repository.getTrash()).toHaveLength(0);
-    await repository.markMovieWatched(title, false);
+    await repository.markMovieWatched(watchedTitle, true);
+    await repository.markMovieWatched(watchedTitle, false);
     trash = await repository.getTrash();
     expect(trash.map((item) => item.kind)).toEqual(['movie']);
     await repository.restoreTrashItem(trash[0].id);
-    expect(await repository.isMovieWatched(title)).toBe(true);
-    await repository.setFavorite(title, false);
+    expect(await repository.isMovieWatched(watchedTitle)).toBe(true);
+    await repository.setFavorite(watchedTitle, true);
+    await repository.setFavorite(watchedTitle, false);
     expect((await repository.getTrash()).map((item) => item.kind)).toEqual(['favorite']);
     await adapter.database.runAsync("UPDATE deleted_items SET deleted_at = datetime('now', '-31 days')");
     expect(await repository.getTrash()).toHaveLength(0);
+    adapter.close();
+  });
+
+  it('restoring a watchlist item on a watched title moves it back to the watchlist', async () => {
+    const { adapter, ready } = setupRepository();
+    const repository = await ready;
+    const title = movie(224);
+    await repository.addToWatchlist(title);
+    await repository.removeFromWatchlist(title);
+    await repository.markMovieWatched(title, true);
+    const trash = await repository.getTrash();
+    await repository.restoreTrashItem(trash[0].id);
+    expect(await repository.isInWatchlist(title)).toBe(true);
+    expect(await repository.isMovieWatched(title)).toBe(false);
     adapter.close();
   });
 

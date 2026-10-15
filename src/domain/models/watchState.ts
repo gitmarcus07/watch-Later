@@ -93,9 +93,12 @@ export interface UpcomingEpisode {
 }
 
 export interface LibraryStatus {
+  /** Saved for later — never true for a title that is already watched. */
   watchlisted: boolean;
   movieWatched: boolean;
   tracking: boolean;
+  /** Finished: a watched movie or a series with every known episode done. */
+  complete: boolean;
 }
 
 export interface MovieWatchState {

@@ -50,7 +50,12 @@ export interface CatalogRepository {
   getUpcomingSeriesPage(page: number, region?: string, signal?: AbortSignal): Promise<PagedCatalog>;
   /** Paged not-yet-released anime (AniList open API), most popular first. */
   getUpcomingAnimePage(page: number, signal?: AbortSignal): Promise<PagedCatalog>;
+  /** Paged titles for one genre, scoped to a shelf (`all`, `movies`, `shows`, `anime`). */
+  getGenrePage(page: number, genreId: number, kind: GenrePageKind, signal?: AbortSignal): Promise<PagedCatalog>;
 }
+
+/** Which shelf of a genre screen is showing. */
+export type GenrePageKind = 'all' | 'movies' | 'shows' | 'anime';
 
 export interface PagedCatalog {
   items: CatalogMedia[];

@@ -35,11 +35,11 @@ describe('Phase 4 SQLite watch state', () => {
 
   afterEach(() => adapter.close());
 
-  it('migrates a fresh database to version 16 with watch state and durable sync tables', async () => {
+  it('migrates a fresh database to version 17 with watch state and durable sync tables', async () => {
     const version = await adapter.database.getFirstAsync<{ user_version: number }>('PRAGMA user_version');
     const tables = await adapter.database.getAllAsync<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'table'");
     const indexes = await adapter.database.getAllAsync<{ name: string }>("SELECT name FROM sqlite_master WHERE type = 'index'");
-    expect(version?.user_version).toBe(16);
+    expect(version?.user_version).toBe(17);
     expect(tables.map(({ name }) => name)).toEqual(expect.arrayContaining(['tracked_media', 'watchlist_entries', 'movie_watches', 'tracked_series', 'tracked_seasons', 'tracked_episodes', 'sync_queue', 'account_binding', 'favorite_entries', 'custom_lists', 'custom_list_items', 'user_ratings', 'list_folders', 'deleted_items', 'interested_entries', 'anime_progress']));
     expect(indexes.map(({ name }) => name)).toEqual(expect.arrayContaining(['idx_watchlist_added', 'idx_movie_watches_date', 'idx_tracked_series_updated', 'idx_tracked_episodes_series_order', 'idx_tracked_episodes_watched']));
   });
@@ -130,7 +130,7 @@ describe('Phase 4 SQLite watch state', () => {
       'is_deleted', 'updated_at', 'payload', 'retry_count', 'last_error',
     ]));
     expect(queued).toMatchObject({ id: 1, entity_type: 'movie', entity_key: 'tmdb:movie:7', provider_id: '7', updated_at: '2026-01-02T03:04:05.000Z', payload: '{}', retry_count: 2, last_error: 'retry later' });
-    expect(version?.user_version).toBe(16);
+    expect(version?.user_version).toBe(17);
 
     await runMigrations(legacy.database);
     expect(await legacy.database.getFirstAsync<{ count: number }>('SELECT COUNT(*) AS count FROM sync_queue')).toEqual({ count: 1 });
@@ -144,7 +144,7 @@ describe('Phase 4 SQLite watch state', () => {
     const preserved = await legacy.database.getFirstAsync<{ value: string }>("SELECT value FROM app_metadata WHERE key = 'install'");
     const versions = await legacy.database.getAllAsync<{ version: number }>('SELECT version FROM schema_migrations ORDER BY version');
     expect(preserved?.value).toBe('kept');
-    expect(versions.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16]);
+    expect(versions.map(({ version }) => version)).toEqual([1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15, 16, 17]);
     legacy.close();
   });
 
@@ -160,24 +160,110 @@ describe('Phase 4 SQLite watch state', () => {
     legacy.close();
   });
 
-  it('keeps movie watchlist and watched state independent, unique, and persistent across repository reload', async () => {
+  it('keeps movie watchlist and watched state mutually exclusive in both directions across reloads', async () => {
     const movie = createMovie(42);
     await repository.addToWatchlist(movie);
     await repository.addToWatchlist(movie);
     await repository.markMovieWatched(movie, true);
+    // Watched wins: the watchlist row is gone, never both at once.
+    expect(await repository.getWatchlist()).toHaveLength(0);
+    expect(await repository.isInWatchlist(movie)).toBe(false);
+    expect(await repository.getLibraryStatuses([movie])).toMatchObject({ [movie.id]: { watchlisted: false, movieWatched: true, complete: true } });
+    expect(await adapter.database.getFirstAsync('SELECT 1 AS found FROM watchlist_entries WHERE media_id = ?', movie.id)).toBeNull();
+    const pendingAfterWatch = await repository.getPendingChanges();
+    expect(pendingAfterWatch).toEqual(expect.arrayContaining([expect.objectContaining({ entityType: 'watchlist', entityKey: movie.id, deleted: true })]));
     const firstWatch = await adapter.database.getFirstAsync<{ watched_at: string; rewatch_count: number }>('SELECT watched_at, rewatch_count FROM movie_watches WHERE media_id = ?', movie.id);
     expect(firstWatch?.rewatch_count ?? 0).toBe(0);
     await repository.markMovieWatched(movie, true);
     const repeatedWatch = await adapter.database.getFirstAsync<{ watched_at: string; rewatch_count: number }>('SELECT watched_at, rewatch_count FROM movie_watches WHERE media_id = ?', movie.id);
     expect(repeatedWatch?.rewatch_count).toBe(1);
     const reloaded = new SqliteWatchStateRepository(async () => adapter.database);
+    expect(await reloaded.isMovieWatched(movie)).toBe(true);
+    expect(await reloaded.getWatchedLibrary()).toHaveLength(1);
+    // Watchlist wins: saving it back un-marks watched.
+    await reloaded.addToWatchlist(movie);
     expect((await reloaded.getWatchlist()).map(({ media }) => media.id)).toEqual([movie.id]);
-    expect(await reloaded.isMovieWatched(movie)).toBe(true);
-    await reloaded.removeFromWatchlist(movie);
-    expect(await reloaded.isMovieWatched(movie)).toBe(true);
-    expect(await reloaded.getWatchlist()).toHaveLength(0);
-    await reloaded.markMovieWatched(movie, false);
+    expect(await reloaded.isMovieWatched(movie)).toBe(false);
     expect(await reloaded.getWatchedLibrary()).toHaveLength(0);
+    expect(await reloaded.getLibraryStatuses([movie])).toMatchObject({ [movie.id]: { watchlisted: true, movieWatched: false, complete: false } });
+    await reloaded.removeFromWatchlist(movie);
+    expect(await reloaded.getWatchlist()).toHaveLength(0);
+  });
+
+  it('completes a series when its last episode is watched and drops it from the watchlist', async () => {
+    const series = createSeries();
+    const first = createSeason(series, [1, 2, 3].map((number) => createEpisode(series, number)));
+    const secondEpisode = createEpisode(series, 1, 2);
+    const second: CatalogSeason = { series, seasonNumber: 2, name: 'Season 2', episodes: [secondEpisode] };
+    await repository.addToWatchlist(series);
+    await repository.setSeriesWatched(series, [first, second], true);
+    expect(await repository.getWatchlist()).toHaveLength(0);
+    expect(await repository.isSeriesTracked(series)).toBe(true);
+    const watched = await repository.getWatchedLibrary();
+    expect(watched).toHaveLength(1);
+    expect(await repository.getLibraryStatuses([series])).toMatchObject({ [series.id]: { watchlisted: false, complete: true } });
+  });
+
+  it('keeps an in-progress series in the watchlist and out of the watched library', async () => {
+    const series = createSeries();
+    const season = createSeason(series, [1, 2, 3].map((number) => createEpisode(series, number)));
+    await repository.addToWatchlist(series);
+    await repository.startTrackingSeries(series);
+    await repository.setEpisodeWatched(series, season, season.episodes[0], true);
+    expect((await repository.getWatchlist()).map(({ media }) => media.id)).toEqual([series.id]);
+    expect(await repository.getWatchedLibrary()).toHaveLength(0);
+    expect(await repository.getLibraryStatuses([series])).toMatchObject({ [series.id]: { watchlisted: true, complete: false } });
+  });
+
+  it('purges legacy watched-and-watchlisted overlap on migration with a synced tombstone', async () => {
+    const legacy = createSqliteTestAdapter();
+    legacy.raw.exec('PRAGMA foreign_keys = ON');
+    await runMigrations(legacy.database);
+    // Pretend the device is still on v16 so the overlap purge re-runs below.
+    await legacy.database.runAsync('DELETE FROM schema_migrations WHERE version = ?', 17);
+    legacy.raw.exec('PRAGMA user_version = 16');
+    const legacyRepository = new SqliteWatchStateRepository(async () => legacy.database);
+    const movie = createMovie(501);
+    const series = createSeries();
+    const season = createSeason(series, [1, 2, 3, 4].map((number) => createEpisode(series, number)));
+    // Simulate rows written by the pre-fix app: watchlist AND watched at once.
+    await legacyRepository.markMovieWatched(movie, true);
+    await legacy.database.runAsync('INSERT INTO watchlist_entries (media_id) VALUES (?)', movie.id);
+    await legacyRepository.setSeriesWatched(series, [season], true);
+    await legacy.database.runAsync('INSERT INTO watchlist_entries (media_id) VALUES (?)', series.id);
+    await legacy.database.runAsync('DELETE FROM sync_queue');
+
+    await runMigrations(legacy.database);
+
+    expect(await legacy.database.getFirstAsync('SELECT 1 AS found FROM watchlist_entries WHERE media_id = ?', movie.id)).toBeNull();
+    expect(await legacy.database.getFirstAsync('SELECT 1 AS found FROM watchlist_entries WHERE media_id = ?', series.id)).toBeNull();
+    const tombstones = await legacy.database.getAllAsync<{ entity_key: string; is_deleted: number; payload: string }>('SELECT entity_key, is_deleted, payload FROM sync_queue WHERE entity_type = ?', 'watchlist');
+    expect(tombstones.map((row) => row.entity_key).sort()).toEqual([movie.id, series.id].sort());
+    expect(tombstones.every((row) => row.is_deleted === 1)).toBe(true);
+    expect(JSON.parse(tombstones.find((row) => row.entity_key === movie.id)?.payload ?? '{}').media.title).toBe(movie.title);
+    legacy.close();
+  });
+
+  it('lets a remote watchlist add back a title only when it is not watched here', async () => {
+    const movie = createMovie(601);
+    await repository.markMovieWatched(movie, true);
+    await repository.applyRemoteChanges([{
+      id: -1, entityType: 'watchlist', entityKey: movie.id, provider: movie.provider,
+      mediaType: movie.mediaType, providerId: movie.providerId, deleted: false,
+      updatedAt: new Date().toISOString(), media: movie, retryCount: 0,
+    }]);
+    expect(await repository.getWatchlist()).toHaveLength(0);
+    expect(await repository.isInWatchlist(movie)).toBe(false);
+    // A remote watched mark removes the local watchlist row instead of coexisting.
+    const other = createMovie(602);
+    await repository.addToWatchlist(other);
+    await repository.applyRemoteChanges([{
+      id: -1, entityType: 'movie', entityKey: other.id, provider: other.provider,
+      mediaType: other.mediaType, providerId: other.providerId, deleted: false,
+      updatedAt: new Date().toISOString(), watchedAt: new Date().toISOString(), media: other, retryCount: 0,
+    }]);
+    expect(await repository.getWatchlist()).toHaveLength(0);
+    expect(await repository.isMovieWatched(other)).toBe(true);
   });
 
   it('persists pending watchlist, movie and episode sync work across repository reloads and coalesces rapid mutations', async () => {
@@ -373,10 +459,14 @@ describe('Phase 4 SQLite watch state', () => {
     await expect(repository.isFavorite({ provider: 'tvdb', mediaType: 'movie', providerId: '290272' })).resolves.toBe(true);
     await repository.markMovieWatched(movie, true);
     await expect(repository.isMovieWatched({ provider: 'tvdb', mediaType: 'movie', providerId: '290272' })).resolves.toBe(true);
+    // Marking it watched moved it out of the watchlist — never both at once.
+    await expect(repository.isInWatchlist({ provider: 'tvdb', mediaType: 'movie', providerId: '290272' })).resolves.toBe(false);
     await repository.startTrackingSeries(series);
     await repository.setEpisodeWatched(series, season, episode, true);
     await expect(repository.getWatchedEpisodeIds({ provider: 'tvdb', mediaType: 'series', providerId: '81189' }, 1)).resolves.toEqual(['111']);
-    expect((await repository.getWatchlist()).map((entry) => entry.media.id)).toContain('tvdb:movie:290272');
+    // An in-progress show is still watchlist material, not "watched".
+    await repository.addToWatchlist(series);
+    expect((await repository.getWatchlist()).map((entry) => entry.media.id)).toEqual(['tvdb:series:81189']);
   });
 });
 

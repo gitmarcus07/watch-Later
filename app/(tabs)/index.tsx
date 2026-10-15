@@ -10,8 +10,12 @@ import { FadeInView } from '@/components/common/FadeInView';
 import { ErrorView, LoadingView, PosterSkeleton } from '@/components/feedback/FeedbackViews';
 import { ContinueWatchingCard } from '@/components/media/ContinueWatchingCard';
 import { PosterCard } from '@/components/media/PosterCard';
+import { FranchiseCard } from '@/components/franchise/FranchiseCard';
+import { GenreCard } from '@/components/genres/GenreCard';
 import { SectionHeader } from '@/components/common/SectionHeader';
 import { mediaRouteId } from '@/features/catalog/mediaIdentity';
+import { franchisesForHome } from '@/features/franchises/catalog';
+import { GENRES } from '@/features/genres/catalog';
 import { useContinueWatching, useWatchedLibrary, useWatchlist, watchKeys } from '@/features/watchState/hooks';
 import { useImdbTop, useRecentlyReleased } from '@/features/catalog/hooks';
 import { mixImdbTops } from '@/data/remote/supabase/imdbRatings';
@@ -85,6 +89,9 @@ export default function HomeScreen() {
     </View>
     </FadeInView>
 
+    {/* Section order by importance: resume what you were watching, this week's
+        new drops, the all-time best, then browse by mood, and the franchise
+        deep-dive (most specialized) last. */}
     <FadeInView delay={90}>
     <View style={styles.section}><SectionHeader title="Continue Watching" subtitle="Pick up right where you left off" />
       {continueQuery.isLoading ? <LoadingView label="Loading your progress" /> : continueQuery.isError ? <ErrorView message="Couldn't load your progress. Try again." onRetry={() => void continueQuery.refetch()} /> : continueQuery.data?.length ? continueQuery.data.slice(0, 2).map((item) => <ContinueWatchingCard key={item.media.id} title={item.media.title} posterUri={item.media.posterUrl} subtitle={item.nextEpisode ? `S${item.nextEpisode.seasonNumber} E${item.nextEpisode.episodeNumber} · ${item.nextEpisode.title}` : `Continue with Season ${item.nextSeasonNumber}`} progress={item.progress} palette={['#2A2438', '#1F1F26']} onPress={() => router.push({ pathname: '/media/[id]', params: { id: mediaRouteId(item.media), season: String(item.nextEpisode?.seasonNumber ?? item.nextSeasonNumber) } })} />) : <Pressable accessibilityRole="button" accessibilityLabel="Find a series to track" onPress={() => router.push('/search')} style={({ pressed }) => [styles.emptyRow, pressed && styles.pressed]}><View style={styles.emptyIcon}><Ionicons name="play-circle-outline" size={20} color={colors.accent} /></View><View style={styles.emptyCopy}><AppText variant="bodyMedium">Nothing in progress</AppText><AppText variant="caption" muted numberOfLines={1}>Track a series to pick up here</AppText></View><Ionicons name="chevron-forward" size={18} color={colors.accent} /></Pressable>}
@@ -118,6 +125,41 @@ export default function HomeScreen() {
           <PosterCard title={item.title} subtitle={`IMDb ★ ${item.rating.toFixed(1)}${item.year ? ` · ${item.year}` : ''}`} posterUri={item.posterUrl} badge={`#${index + 1}`} onPress={() => openMedia(`tmdb:${item.mediaType}:${item.tmdbId}`)} />
         } />
         : null}
+    </View>
+    </FadeInView>
+
+    <FadeInView delay={280}>
+    <View style={styles.section}>
+      <View style={styles.rowHeader}>
+        <SectionHeader title="Genres" subtitle="Movies, shows, and anime by vibe" />
+        <Pressable accessibilityRole="button" accessibilityLabel="See all genres" onPress={() => router.push('/genres' as never)} style={styles.seeAll}><AppText variant="label" style={styles.seeAllText}>See all</AppText><Ionicons name="chevron-forward" size={15} color={colors.accent} /></Pressable>
+      </View>
+      <FlatList horizontal data={GENRES} keyExtractor={(entry) => entry.slug} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.carousel} renderItem={({ item }) =>
+        <GenreCard
+          name={item.name}
+          gradient={item.gradient}
+          width={200}
+          onPress={() => router.push({ pathname: '/genre/[id]', params: { id: String(item.id) } } as never)}
+        />
+      } />
+    </View>
+    </FadeInView>
+
+    <FadeInView delay={340}>
+    <View style={styles.section}>
+      <View style={styles.rowHeader}>
+        <SectionHeader title="Franchises" subtitle="Movie & show universes, in order" />
+        <Pressable accessibilityRole="button" accessibilityLabel="See all franchise collections" onPress={() => router.push('/franchises' as never)} style={styles.seeAll}><AppText variant="label" style={styles.seeAllText}>See all</AppText><Ionicons name="chevron-forward" size={15} color={colors.accent} /></Pressable>
+      </View>
+      <FlatList horizontal data={franchisesForHome(8)} keyExtractor={(entry) => entry.slug} showsHorizontalScrollIndicator={false} contentContainerStyle={styles.carousel} renderItem={({ item }) =>
+        <FranchiseCard
+          title={item.title}
+          itemCount={item.items.length}
+          backdropUri={item.backdropPath ? `https://image.tmdb.org/t/p/w780${item.backdropPath}` : undefined}
+          width={200}
+          onPress={() => router.push({ pathname: '/franchise/[slug]', params: { slug: item.slug } } as never)}
+        />
+      } />
     </View>
     </FadeInView>
   </Screen>;

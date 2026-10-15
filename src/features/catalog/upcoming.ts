@@ -13,6 +13,24 @@ function isFutureReleaseDate(releaseDate: string, start: string, currentYear: nu
   return releaseDate > start;
 }
 
+/**
+ * Whether a calendar date has already arrived.
+ *
+ * Weekly shows publish one episode at a time, so a date still ahead of today
+ * marks something the viewer cannot have seen yet. A missing or unparseable
+ * value counts as released — the catalog simply does not know, and locking
+ * everything off would be worse than allowing it.
+ */
+export function hasAired(date?: string): boolean {
+  if (!date) return true;
+  // Dates arrive as `YYYY-MM-DD` in the show's own local day, so read the
+  // parts instead of parsing — `Date.parse` shifts them by the timezone.
+  const parts = /^(\d{4})-(\d{2})-(\d{2})/.exec(date);
+  const day = parts ? new Date(Number(parts[1]), Number(parts[2]) - 1, Number(parts[3])) : new Date(Date.parse(date));
+  if (Number.isNaN(day.getTime())) return true;
+  return Date.now() >= day.getTime();
+}
+
 /** Production statuses that mean "not out yet". Never throws. */
 export function isUnreleasedStatus(status?: string | null): boolean {
   const normalized = (status ?? '').toLowerCase().replaceAll('_', ' ').replaceAll('-', ' ').trim();

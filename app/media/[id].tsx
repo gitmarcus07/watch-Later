@@ -191,11 +191,13 @@ export default function MediaDetailScreen() {
 
   function handleSavePriority(priority: WatchPriority) {
     triggerLightHaptic();
+    // Saving over a watched title moves it out of Watched into the watchlist.
+    const movedFromWatched = Boolean(watched);
     saveToWatchlistMutation.mutate(priority, {
       onSuccess: () => {
         triggerSuccessHaptic();
         setSheetOpen(false);
-        showToast(`Saved to Watchlist · ${PRIORITY_META[priority].label}`, 'success');
+        showToast(`${movedFromWatched ? 'Moved' : 'Saved'} to Watchlist · ${PRIORITY_META[priority].label}`, 'success');
       },
       onError: (error) => void showDialog({ type: 'error', title: 'Couldn’t save to watchlist', message: friendlyErrorMessage(error) }),
     });
@@ -275,7 +277,7 @@ export default function MediaDetailScreen() {
             }); },
             accessibilityLabel: favoriteStatus.data ? 'Remove from favorites' : 'Add to favorites',
           },
-          ...(episodic ? [{
+          ...(episodic && !watched ? [{
             id: 'tracking',
             label: trackingStatus.data ? 'Tracking' : 'Track Show',
             icon: 'play-outline' as const,

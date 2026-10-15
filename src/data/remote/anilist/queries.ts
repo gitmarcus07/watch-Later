@@ -76,6 +76,17 @@ query RecentAnimePage($page: Int!, $perPage: Int!) {
   }
 }`;
 
+/** One genre shelf: exact AniList GenreCollection names (e.g. "Mystery"). */
+export const ANIME_GENRE_PAGE_QUERY = `
+query GenreAnimePage($page: Int!, $perPage: Int!, $genre: [String]) {
+  Page(page: $page, perPage: $perPage) {
+    pageInfo { total perPage currentPage lastPage hasNextPage }
+    media(type: ANIME, sort: POPULARITY_DESC, isAdult: false, genre_in: $genre) {
+      ${ANIME_FIELDS}
+    }
+  }
+}`;
+
 export const ANIME_TOP_RATED_QUERY = `
 query TopRatedAnime($page: Int!, $perPage: Int!) {
   Page(page: $page, perPage: $perPage) {

@@ -1,10 +1,11 @@
 import { keepPreviousData, useInfiniteQuery, useQuery } from '@tanstack/react-query';
-import type { CatalogFilter, CatalogMedia, MediaIdentity, SeasonSummary } from '@/domain/models/media';
+import type { CatalogFilter, CatalogMedia, CatalogSeason, MediaIdentity, SeasonSummary } from '@/domain/models/media';
 import type { PagedCatalog } from '@/domain/repositories/CatalogRepository';
 import { catalogRepository } from '@/data/remote/catalog/RemoteCatalogRepository';
 import { deviceRegion } from '@/data/remote/catalog/region';
 import { fetchImdbTop } from '@/data/remote/supabase/imdbRatings';
 import { fetchImdbRatingsFor, type ImdbRating } from '@/data/remote/supabase/imdbRatings';
+import { queryClient } from '@/lib/query/queryClient';
 
 export function useCatalogSearch(query: string, filter: CatalogFilter, enabled: boolean) {
   const normalized = query.trim();
@@ -32,7 +33,12 @@ export function useCatalogMedia(identity: MediaIdentity | undefined) {
   });
 }
 
-export function useCatalogSeason(identity: MediaIdentity | undefined, seasonNumber: number | undefined, summary?: SeasonSummary) {
+/**
+ * The season payload query, shared by `useCatalogSeason` and by callers that
+ * need the same cached entry on demand — the collapsed season checkbox pulls
+ * it so it can toggle without first expanding the card.
+ */
+export function catalogSeasonOptions(identity: MediaIdentity | undefined, seasonNumber: number | undefined, summary?: SeasonSummary) {
   const enabled = Boolean(
     identity && seasonNumber !== undefined
     && ((identity.provider === 'tmdb' && identity.mediaType === 'series')
@@ -40,21 +46,31 @@ export function useCatalogSeason(identity: MediaIdentity | undefined, seasonNumb
       || (identity.provider === 'tvdb' && identity.mediaType !== 'movie')),
   );
   const refKey = identity?.provider === 'anilist' ? (summary?.refProviderId ?? '') : '';
-  return useQuery({
-    queryKey: identity && seasonNumber !== undefined ? ['catalog', identity.provider, identity.mediaType, identity.providerId, 'season', seasonNumber, refKey] as const : ['catalog', 'season', 'disabled'],
-    queryFn: ({ signal }) => {
-      if (!identity || seasonNumber === undefined) return Promise.reject(new Error('Invalid season identity'));
-      // Anime seasons resolve from their own summary refs without re-walking
-      // the AniList chain, so expanding stays to a single cheap request.
-      if (identity.provider === 'anilist' && identity.mediaType === 'anime' && summary) {
-        return catalogRepository.getAnimeSeasonByRef(identity, summary, signal);
-      }
-      return catalogRepository.getSeason(identity, seasonNumber, signal);
-    },
-    enabled,
-    staleTime: 10 * 60_000,
-    gcTime: 30 * 60_000,
-  });
+  const queryKey = identity && seasonNumber !== undefined
+    ? ['catalog', identity.provider, identity.mediaType, identity.providerId, 'season', seasonNumber, refKey] as const
+    : ['catalog', 'season', 'disabled'] as const;
+  const queryFn = ({ signal }: { signal: AbortSignal }) => {
+    if (!identity || seasonNumber === undefined) return Promise.reject(new Error('Invalid season identity'));
+    // Anime seasons resolve from their own summary refs without re-walking
+    // the AniList chain, so expanding stays to a single cheap request.
+    if (identity.provider === 'anilist' && identity.mediaType === 'anime' && summary) {
+      return catalogRepository.getAnimeSeasonByRef(identity, summary, signal);
+    }
+    return catalogRepository.getSeason(identity, seasonNumber, signal);
+  };
+  return { queryKey, queryFn, enabled, staleTime: 10 * 60_000, gcTime: 30 * 60_000 };
+}
+
+export function useCatalogSeason(identity: MediaIdentity | undefined, seasonNumber: number | undefined, summary?: SeasonSummary) {
+  return useQuery(catalogSeasonOptions(identity, seasonNumber, summary));
+}
+
+/**
+ * Awaits a season payload, reusing the `useCatalogSeason` cache entry so an
+ * on-demand load and an expanded card never fetch the same season twice.
+ */
+export async function fetchCatalogSeason(identity: MediaIdentity, seasonNumber: number, summary?: SeasonSummary): Promise<CatalogSeason> {
+  return queryClient.fetchQuery(catalogSeasonOptions(identity, seasonNumber, summary));
 }
 
 export function useTrending() {
@@ -171,7 +187,7 @@ export function useTmdbEnrichment(media: CatalogMedia | null | undefined) {
   });
 }
 
-function useInfiniteCatalog(key: readonly string[], fetchPage: (page: number, signal?: AbortSignal) => Promise<PagedCatalog>, enabled = true) {
+export function useInfiniteCatalog(key: readonly (string | number)[], fetchPage: (page: number, signal?: AbortSignal) => Promise<PagedCatalog>, enabled = true) {
   return useInfiniteQuery({
     queryKey: key,
     queryFn: ({ pageParam, signal }) => fetchPage(pageParam, signal),

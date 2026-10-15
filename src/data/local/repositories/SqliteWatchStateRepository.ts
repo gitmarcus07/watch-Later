@@ -191,6 +191,111 @@ function toProgress(row: SeriesRow, episodes: EpisodeRow[]): SeriesProgress {
   };
 }
 
+function summariesTotal(summaries: { episodeCount?: number }[] | undefined): number | undefined {
+  if (!summaries?.length) return undefined;
+  const counts = summaries.map((season) => season.episodeCount);
+  if (!counts.every((count): count is number => typeof count === 'number')) return undefined;
+  const total = counts.reduce((sum, count) => sum + count, 0);
+  return total > 0 ? total : undefined;
+}
+
+/** Episode total the catalog reported, mirroring `toProgress`'s denominator. */
+function knownEpisodeTotal(media: { numberOfEpisodes?: number | null; seasonSummaries?: { episodeCount?: number }[] | null }): number | undefined {
+  if (media.numberOfEpisodes && media.numberOfEpisodes > 0) return media.numberOfEpisodes;
+  return summariesTotal(media.seasonSummaries ?? undefined);
+}
+
+/**
+ * Signals selected next to a media row so every read path shares one definition
+ * of "watched": a movie row, a completed series flag, or episode progress that
+ * reached the known episode total — exactly what `toProgress().isComplete` and
+ * the content page use.
+ */
+interface WatchedSignals {
+  movie_watched?: number | null; watched_count?: number | null; completed?: number | null;
+  number_of_episodes?: number | null; season_summaries?: string | null;
+  numberOfEpisodes?: number | null; seasonSummaries?: { episodeCount?: number }[] | null;
+}
+
+const WATCHED_SIGNALS_SQL = `EXISTS (SELECT 1 FROM movie_watches mw WHERE mw.media_id = m.id) AS movie_watched,
+  (SELECT COUNT(*) FROM tracked_episodes te WHERE te.series_id = m.id AND te.watched_at IS NOT NULL) AS watched_count,
+  (SELECT ts.completed FROM tracked_series ts WHERE ts.media_id = m.id) AS completed,
+  m.number_of_episodes, m.season_summaries`;
+
+function isWatchedRow(row: WatchedSignals): boolean {
+  if (row.movie_watched === 1) return true;
+  if (row.completed === 1) return true;
+  const summaries = row.seasonSummaries ?? (row.season_summaries ? parseJson<{ episodeCount?: number }[]>(row.season_summaries, []) : undefined);
+  const total = knownEpisodeTotal({ numberOfEpisodes: row.number_of_episodes ?? row.numberOfEpisodes ?? undefined, seasonSummaries: summaries });
+  const watched = row.watched_count ?? 0;
+  return Boolean(total && watched > 0 && watched >= total);
+}
+
+/** True when the title currently reads as watched/finished anywhere in the app. */
+async function isWatchedId(db: SQLiteDatabase, id: string): Promise<boolean> {
+  const row = await db.getFirstAsync<WatchedSignals>(`SELECT ${WATCHED_SIGNALS_SQL} FROM tracked_media m WHERE m.id = ?`, id);
+  return Boolean(row && isWatchedRow(row));
+}
+
+/**
+ * Removes the watchlist row as a state conversion (watched wins over the
+ * watchlist), syncing a tombstone but never a trash snapshot — nothing the user
+ * asked for was removed.
+ */
+async function dropWatchlistEntry(db: SQLiteDatabase, media: CatalogMedia, now: string): Promise<boolean> {
+  const existing = await db.getFirstAsync<{ position: number | null }>('SELECT position FROM watchlist_entries WHERE media_id = ?', media.id);
+  if (!existing) return false;
+  await db.runAsync('DELETE FROM watchlist_entries WHERE media_id = ?', media.id);
+  await enqueueSyncChange(db, { entityType: 'watchlist', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: true, updatedAt: now, media, position: existing.position ?? 0 });
+  return true;
+}
+
+/**
+ * Adding to the watchlist un-marks a watched title (last action wins). Only
+ * titles that currently read as watched are cleared, so in-progress episode
+ * progress is never destroyed by re-saving a watchlist entry.
+ */
+async function clearWatchedForWatchlist(db: SQLiteDatabase, media: CatalogMedia, now: string): Promise<void> {
+  if (!await isWatchedId(db, media.id)) return;
+  if (media.mediaType === 'movie') {
+    await db.runAsync('DELETE FROM movie_watches WHERE media_id = ?', media.id);
+    await enqueueSyncChange(db, { entityType: 'movie', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: true, updatedAt: now, media });
+    return;
+  }
+  const watchedEpisodes = await db.getAllAsync<EpisodeRow>('SELECT * FROM tracked_episodes WHERE series_id = ? AND watched_at IS NOT NULL', media.id);
+  if (watchedEpisodes.length) {
+    await db.runAsync('UPDATE tracked_episodes SET watched_at = NULL, updated_at = CURRENT_TIMESTAMP WHERE series_id = ? AND watched_at IS NOT NULL', media.id);
+    for (const row of watchedEpisodes) {
+      const episode = mapEpisode(row);
+      await enqueueSyncChange(db, { entityType: 'episode', entityKey: `${media.id}:${episode.seasonNumber}:${episode.episodeNumber}`, provider: media.provider, mediaType: media.mediaType, providerId: episode.providerId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, deleted: true, updatedAt: now, media, episode, rewatchCount: row.rewatch_count ?? 0 });
+    }
+  }
+  const tracked = await db.getFirstAsync('SELECT 1 AS found FROM tracked_series WHERE media_id = ?', media.id);
+  if (tracked) {
+    await db.runAsync('UPDATE tracked_series SET completed = 0, completed_at = NULL, updated_at = ? WHERE media_id = ?', now, media.id);
+    await enqueueSyncChange(db, { entityType: 'series', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: false, updatedAt: now, media, completed: false });
+  }
+  await db.runAsync('DELETE FROM anime_progress WHERE media_id = ?', media.id);
+}
+
+/**
+ * Completing the last known episode marks the series finished and drops it from
+ * the watchlist, so episode-level writes can never leave a finished show in the
+ * watchlist or still reading as in-progress.
+ */
+async function syncSeriesCompletion(db: SQLiteDatabase, media: CatalogMedia, now: string): Promise<void> {
+  const counts = await db.getFirstAsync<{ watched: number }>('SELECT COUNT(*) AS watched FROM tracked_episodes WHERE series_id = ? AND watched_at IS NOT NULL', media.id);
+  const watched = counts?.watched ?? 0;
+  const total = knownEpisodeTotal(media);
+  if (!total || watched <= 0 || watched < total) return;
+  const tracked = await db.getFirstAsync<{ completed: number | null }>('SELECT completed FROM tracked_series WHERE media_id = ?', media.id);
+  if (tracked?.completed !== 1) {
+    await db.runAsync('UPDATE tracked_series SET completed = 1, completed_at = ?, updated_at = ? WHERE media_id = ?', now, now, media.id);
+    await enqueueSyncChange(db, { entityType: 'series', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: false, updatedAt: now, media, completed: true, watchedAt: now });
+  }
+  await dropWatchlistEntry(db, media, now);
+}
+
 export class SqliteWatchStateRepository implements WatchStateRepository, WatchStateSyncRepository {
   private binding?: { accountId: string; promise: Promise<void> };
 
@@ -212,19 +317,22 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
   }
 
   async getLibraryStatuses(identities: MediaIdentity[]): Promise<Record<string, LibraryStatus>> {
-    const statuses: Record<string, LibraryStatus> = Object.fromEntries(identities.map((identity) => [mediaId(identity), { watchlisted: false, movieWatched: false, tracking: false }]));
+    const statuses: Record<string, LibraryStatus> = Object.fromEntries(identities.map((identity) => [mediaId(identity), { watchlisted: false, movieWatched: false, tracking: false, complete: false }]));
     if (!identities.length) return statuses;
     return this.run("Couldn't load saved states.", async (db) => {
       const ids = identities.map(mediaId);
       const placeholders = ids.map(() => '?').join(', ');
-      const rows = await db.getAllAsync<{ id: string; watchlisted: number; movie_watched: number; tracking: number }>(
+      const rows = await db.getAllAsync<{ id: string; on_watchlist: number; tracking: number } & WatchedSignals>(
         `SELECT m.id,
-          EXISTS (SELECT 1 FROM watchlist_entries w WHERE w.media_id = m.id) AS watchlisted,
-          EXISTS (SELECT 1 FROM movie_watches mw WHERE mw.media_id = m.id) AS movie_watched,
+          EXISTS (SELECT 1 FROM watchlist_entries w WHERE w.media_id = m.id) AS on_watchlist,
+          ${WATCHED_SIGNALS_SQL},
           EXISTS (SELECT 1 FROM tracked_series ts WHERE ts.media_id = m.id) AS tracking
          FROM tracked_media m WHERE m.id IN (${placeholders})`, ...ids,
       );
-      for (const row of rows) statuses[row.id] = { watchlisted: row.watchlisted === 1, movieWatched: row.movie_watched === 1, tracking: row.tracking === 1 };
+      for (const row of rows) {
+        const complete = isWatchedRow(row);
+        statuses[row.id] = { watchlisted: row.on_watchlist === 1 && !complete, movieWatched: row.movie_watched === 1, tracking: row.tracking === 1, complete };
+      }
       return statuses;
     });
   }
@@ -245,10 +353,13 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
     await this.run("Couldn't update your watchlist. Try again.", async (db) => {
       await db.withExclusiveTransactionAsync(async (tx) => {
         await saveMedia(tx, media);
+        const now = new Date().toISOString();
+        // Last action wins: saving to the watchlist un-marks a watched title.
+        await clearWatchedForWatchlist(tx, media, now);
         const existing = await tx.getFirstAsync<{ position: number }>('SELECT position FROM watchlist_entries WHERE media_id = ?', media.id);
         const position = existing?.position ?? (await tx.getFirstAsync<{ position: number | null }>('SELECT COALESCE(MIN(position), 0) - 1 AS position FROM watchlist_entries'))?.position ?? -1;
         await tx.runAsync('INSERT INTO watchlist_entries (media_id, position) VALUES (?, ?) ON CONFLICT(media_id) DO NOTHING', media.id, position);
-        await enqueueSyncChange(tx, { entityType: 'watchlist', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: false, updatedAt: new Date().toISOString(), media, position });
+        await enqueueSyncChange(tx, { entityType: 'watchlist', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: false, updatedAt: now, media, position });
       });
     });
   }
@@ -258,6 +369,8 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
       await db.withExclusiveTransactionAsync(async (tx) => {
         await saveMedia(tx, media);
         const now = new Date().toISOString();
+        // Last action wins: saving to the watchlist un-marks a watched title.
+        await clearWatchedForWatchlist(tx, media, now);
         const existing = await tx.getFirstAsync<{ position: number; added_at: string }>('SELECT position, added_at FROM watchlist_entries WHERE media_id = ?', media.id);
         const position = existing?.position ?? (await tx.getFirstAsync<{ position: number | null }>('SELECT COALESCE(MIN(position), 0) - 1 AS position FROM watchlist_entries'))?.position ?? -1;
         await tx.runAsync(
@@ -308,13 +421,17 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
 
   async getWatchlist(): Promise<WatchlistEntry[]> {
     return this.run("Couldn't load your watchlist.", async (db) => {
-      const rows = await db.getAllAsync<MediaRow & { added_at: string; position: number; priority: string | null }>('SELECT m.*, w.added_at, w.position, w.priority FROM watchlist_entries w JOIN tracked_media m ON m.id = w.media_id ORDER BY w.position ASC, w.added_at DESC, m.title COLLATE NOCASE');
-      return rows.map((row) => ({ media: mapMedia(row), addedAt: row.added_at, position: row.position ?? 0, priority: isWatchPriority(row.priority) ? row.priority : null }));
+      const rows = await db.getAllAsync<MediaRow & WatchedSignals & { added_at: string; position: number; priority: string | null }>(`SELECT m.*, ${WATCHED_SIGNALS_SQL}, w.added_at, w.position, w.priority FROM watchlist_entries w JOIN tracked_media m ON m.id = w.media_id ORDER BY w.position ASC, w.added_at DESC, m.title COLLATE NOCASE`);
+      // Watchlist and Watched are mutually exclusive: hide rows that read as watched.
+      return rows.filter((row) => !isWatchedRow(row)).map((row) => ({ media: mapMedia(row), addedAt: row.added_at, position: row.position ?? 0, priority: isWatchPriority(row.priority) ? row.priority : null }));
     });
   }
 
   async isInWatchlist(identity: MediaIdentity): Promise<boolean> {
-    return this.run("Couldn't check your watchlist.", async (db) => Boolean(await db.getFirstAsync('SELECT 1 AS found FROM watchlist_entries WHERE media_id = ?', mediaId(identity))));
+    return this.run("Couldn't check your watchlist.", async (db) => {
+      const row = await db.getFirstAsync<WatchedSignals>(`SELECT ${WATCHED_SIGNALS_SQL} FROM watchlist_entries w JOIN tracked_media m ON m.id = w.media_id WHERE w.media_id = ?`, mediaId(identity));
+      return Boolean(row && !isWatchedRow(row));
+    });
   }
 
   async markMovieWatched(media: CatalogMedia, watched: boolean): Promise<void> {
@@ -332,6 +449,8 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
             media.id, now,
           );
           rewatchCount = (await tx.getFirstAsync<{ rewatch_count: number }>('SELECT rewatch_count FROM movie_watches WHERE media_id = ?', media.id))?.rewatch_count ?? 0;
+          // Watched wins over the watchlist: never both at once.
+          await dropWatchlistEntry(tx, media, now);
         } else {
           const prior = await tx.getFirstAsync<{ watched_at: string }>('SELECT watched_at FROM movie_watches WHERE media_id = ?', media.id);
           if (prior) await trashSnapshot(tx, 'movie', { media, watchedAt: prior.watched_at });
@@ -398,6 +517,8 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
         const rewatchCount = (await tx.getFirstAsync<{ rewatch_count: number }>('SELECT rewatch_count FROM tracked_episodes WHERE id = ?', episodeId))?.rewatch_count ?? 0;
         await enqueueSyncChange(tx, { entityType: 'episode', entityKey: `${media.id}:${episode.seasonNumber}:${episode.episodeNumber}`, provider: media.provider, mediaType: media.mediaType, providerId: episode.providerId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, deleted: !watched, updatedAt: new Date().toISOString(), media, watchedAt: watched ? now ?? undefined : undefined, episode, rewatchCount });
         await tx.runAsync('UPDATE tracked_series SET updated_at = CURRENT_TIMESTAMP WHERE media_id = ?', media.id);
+        // Finishing the last episode completes the series and clears the watchlist row.
+        if (watched) await syncSeriesCompletion(tx, media, new Date().toISOString());
       });
     });
   }
@@ -419,6 +540,8 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
         const counts = new Map((await tx.getAllAsync<{ provider_id: string; rewatch_count: number }>('SELECT provider_id, rewatch_count FROM tracked_episodes WHERE series_id = ? AND season_number = ?', media.id, season.seasonNumber)).map((row) => [row.provider_id, row.rewatch_count]));
         for (const episode of season.episodes) await enqueueSyncChange(tx, { entityType: 'episode', entityKey: `${media.id}:${episode.seasonNumber}:${episode.episodeNumber}`, provider: media.provider, mediaType: media.mediaType, providerId: episode.providerId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, deleted: !watched, updatedAt: new Date().toISOString(), media, watchedAt: watched ? now ?? undefined : undefined, episode, rewatchCount: counts.get(episode.providerId) ?? 0 });
         await tx.runAsync('UPDATE tracked_series SET updated_at = CURRENT_TIMESTAMP WHERE media_id = ?', media.id);
+        // Finishing the last episode completes the series and clears the watchlist row.
+        if (watched) await syncSeriesCompletion(tx, media, new Date().toISOString());
       });
     });
   }
@@ -445,6 +568,8 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
         const flagAt = new Date().toISOString();
         await tx.runAsync('UPDATE tracked_series SET updated_at = ?, completed = ?, completed_at = ? WHERE media_id = ?', flagAt, watched ? 1 : 0, watched ? now : null, media.id);
         await enqueueSyncChange(tx, { entityType: 'series', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: false, updatedAt: flagAt, media, watchedAt: watched ? now ?? undefined : undefined, completed: watched });
+        // Watched wins over the watchlist: never both at once.
+        if (watched) await dropWatchlistEntry(tx, media, flagAt);
       });
     });
   }
@@ -457,6 +582,8 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
         const now = new Date().toISOString();
         await tx.runAsync('INSERT INTO tracked_series (media_id, tracking_started_at, updated_at, completed, completed_at) VALUES (?, ?, ?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET updated_at=excluded.updated_at, completed=excluded.completed, completed_at=excluded.completed_at', media.id, now, now, complete ? 1 : 0, complete ? now : null);
         await enqueueSyncChange(tx, { entityType: 'series', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: false, updatedAt: now, media, watchedAt: now, completed: complete });
+        // Watched wins over the watchlist: never both at once.
+        if (complete) await dropWatchlistEntry(tx, media, now);
       });
     });
   }
@@ -550,13 +677,18 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
           (SELECT COUNT(*) FROM tracked_episodes e WHERE e.series_id = m.id) AS cached_count
          FROM tracked_media m
          JOIN tracked_series t ON t.media_id = m.id
-         WHERE EXISTS (SELECT 1 FROM tracked_episodes e WHERE e.series_id = m.id AND e.watched_at IS NOT NULL) OR t.completed = 1
+         WHERE t.completed = 1 OR EXISTS (SELECT 1 FROM tracked_episodes e WHERE e.series_id = m.id AND e.watched_at IS NOT NULL)
          ORDER BY m.updated_at DESC, m.title COLLATE NOCASE`,
       );
       const episodes = await db.getAllAsync<EpisodeRow>('SELECT * FROM tracked_episodes ORDER BY season_number, episode_number');
+      // Only finished titles live here; in-progress shows stay in the watchlist
+      // (or Continue Watching), so Watchlist and Watched never overlap.
+      const series = seriesRows
+        .map((row) => toProgress(row, episodes.filter((episode) => episode.series_id === row.id)))
+        .filter((progress) => progress.isComplete);
       return [
         ...movies.map((row): WatchedLibraryItem => ({ kind: 'movie', media: mapMedia(row), watchedAt: row.watched_at })),
-        ...seriesRows.map((row): WatchedLibraryItem => ({ kind: 'series', progress: toProgress(row, episodes.filter((episode) => episode.series_id === row.id)) })),
+        ...series.map((progress): WatchedLibraryItem => ({ kind: 'series', progress })),
       ].sort((a, b) => {
         const dateA = a.kind === 'movie' ? a.watchedAt : a.progress.lastWatchedAt ?? '';
         const dateB = b.kind === 'movie' ? b.watchedAt : b.progress.lastWatchedAt ?? '';
@@ -785,6 +917,8 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
         } else if (media) {
           await saveMedia(tx, media);
           if (row.kind === 'watchlist') {
+            // Restoring to the watchlist wins over watched, same as saving.
+            await clearWatchedForWatchlist(tx, media, now);
             const position = (await tx.getFirstAsync<{ position: number | null }>('SELECT COALESCE(MIN(position), 0) - 1 AS position FROM watchlist_entries'))?.position ?? -1;
             await tx.runAsync('INSERT INTO watchlist_entries (media_id, position) VALUES (?, ?) ON CONFLICT(media_id) DO NOTHING', media.id, position);
             await enqueueSyncChange(tx, { entityType: 'watchlist', entityKey: media.id, provider: media.provider, mediaType: media.mediaType, providerId: media.providerId, deleted: false, updatedAt: now, media, position });
@@ -883,6 +1017,8 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
           await enqueueSyncChange(tx, { entityType: 'episode', entityKey: `${media.id}:${episode.seasonNumber}:${episode.episodeNumber}`, provider: media.provider, mediaType: media.mediaType, providerId: episode.providerId, seasonNumber: episode.seasonNumber, episodeNumber: episode.episodeNumber, deleted: false, updatedAt: now, media, watchedAt: row.watched_at ?? undefined, episode, rewatchCount: row.rewatch_count ?? 0 });
         }
         await tx.runAsync('UPDATE tracked_series SET updated_at = CURRENT_TIMESTAMP WHERE media_id = ?', media.id);
+        // Finishing the last episode completes the series and clears the watchlist row.
+        await syncSeriesCompletion(tx, media, now);
       });
     });
   }
@@ -965,23 +1101,33 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
   async applyRemoteChanges(changes: PendingWatchStateChange[]): Promise<void> {
     await this.run("Couldn't merge your synced library.", async (db) => {
       await db.withExclusiveTransactionAsync(async (tx) => {
+        const touchedSeries = new Set<string>();
         for (const change of changes) {
           await saveMedia(tx, change.media);
           if (change.entityType === 'watchlist') {
             if (change.deleted) await tx.runAsync('DELETE FROM watchlist_entries WHERE media_id = ?', change.media.id);
-            else {
+            else if (await isWatchedId(tx, change.media.id)) {
+              // Watched wins: a finished title never re-enters the watchlist through sync.
+              await tx.runAsync('DELETE FROM watchlist_entries WHERE media_id = ?', change.media.id);
+            } else {
               await tx.runAsync('INSERT INTO watchlist_entries (media_id, added_at, position, priority) VALUES (?, ?, ?, ?) ON CONFLICT(media_id) DO NOTHING', change.media.id, change.updatedAt, change.position ?? 0, change.priority ?? null);
               await tx.runAsync('UPDATE watchlist_entries SET added_at = ?, position = ?, priority = COALESCE(?, priority) WHERE media_id = ?', change.updatedAt, change.position ?? 0, change.priority ?? null, change.media.id);
             }
           } else if (change.entityType === 'movie') {
             if (change.deleted) await tx.runAsync('DELETE FROM movie_watches WHERE media_id = ?', change.media.id);
-            else await tx.runAsync('INSERT INTO movie_watches (media_id, watched_at, rewatch_count) VALUES (?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET watched_at=excluded.watched_at, rewatch_count=excluded.rewatch_count', change.media.id, change.watchedAt ?? change.updatedAt, change.rewatchCount ?? 0);
+            else {
+              await tx.runAsync('INSERT INTO movie_watches (media_id, watched_at, rewatch_count) VALUES (?, ?, ?) ON CONFLICT(media_id) DO UPDATE SET watched_at=excluded.watched_at, rewatch_count=excluded.rewatch_count', change.media.id, change.watchedAt ?? change.updatedAt, change.rewatchCount ?? 0);
+              await dropWatchlistEntry(tx, change.media, change.updatedAt);
+            }
           } else if (change.entityType === 'series') {
             if (change.deleted) await tx.runAsync('DELETE FROM tracked_series WHERE media_id = ?', change.media.id);
             else {
               await tx.runAsync('INSERT INTO tracked_series (media_id, tracking_started_at) VALUES (?, ?) ON CONFLICT(media_id) DO NOTHING', change.media.id, change.updatedAt);
               if (change.completed === undefined) await tx.runAsync('UPDATE tracked_series SET updated_at = ? WHERE media_id = ?', change.updatedAt, change.media.id);
-              else await tx.runAsync('UPDATE tracked_series SET updated_at = ?, completed = ?, completed_at = ? WHERE media_id = ?', change.updatedAt, change.completed ? 1 : 0, change.completed ? change.updatedAt : null, change.media.id);
+              else {
+                await tx.runAsync('UPDATE tracked_series SET updated_at = ?, completed = ?, completed_at = ? WHERE media_id = ?', change.updatedAt, change.completed ? 1 : 0, change.completed ? change.updatedAt : null, change.media.id);
+                if (change.completed) await dropWatchlistEntry(tx, change.media, change.updatedAt);
+              }
             }
           } else if (change.entityType === 'favorite') {
             if (change.deleted) await tx.runAsync('DELETE FROM favorite_entries WHERE media_id = ?', change.media.id);
@@ -996,7 +1142,14 @@ export class SqliteWatchStateRepository implements WatchStateRepository, WatchSt
             await saveMedia(tx, change.media);
             await saveEpisode(tx, change.media, change.episode);
             await tx.runAsync('UPDATE tracked_episodes SET watched_at = ?, rewatch_count = ?, updated_at = ? WHERE id = ?', change.deleted ? null : change.watchedAt ?? change.updatedAt, change.rewatchCount ?? 0, change.updatedAt, episodeRowId(change.episode.provider, change.episode.providerId));
+            if (!change.deleted) touchedSeries.add(change.media.id);
           }
+        }
+        // Incoming episodes can finish a series: keep the invariant locally too.
+        for (const seriesId of touchedSeries) {
+          if (!await isWatchedId(tx, seriesId)) continue;
+          const mediaRow = await tx.getFirstAsync<MediaRow>('SELECT * FROM tracked_media WHERE id = ?', seriesId);
+          if (mediaRow) await dropWatchlistEntry(tx, mapMedia(mediaRow), new Date().toISOString());
         }
       });
     });

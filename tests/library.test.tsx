@@ -230,7 +230,9 @@ describe('settings stores', () => {
 describe('more menu and static screens', () => {
   it('11-17. every more row navigates to a real route', () => {
     const more = readFileSync('app/(tabs)/more.tsx', 'utf8');
-    for (const route of ['/settings/notifications', '/favorites', '/upcoming', '/about', '/privacy']) {
+    // Upcoming lives on its own tab, so the More menu must not repeat it.
+    expect(more).not.toContain('/upcoming');
+    for (const route of ['/settings/notifications', '/favorites', '/about', '/privacy']) {
       expect(more).toContain(route);
     }
     for (const removed of ['/settings/ratings', '/settings/appearance', '/collections', '/trash', '/history']) {

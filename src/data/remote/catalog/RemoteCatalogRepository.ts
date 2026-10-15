@@ -1,7 +1,8 @@
 import { CatalogError } from '@/domain/errors/CatalogError';
 import type { CatalogFilter, CatalogMedia, CatalogSeason, CatalogSearchResult, MediaEpisode, MediaIdentity, MediaProvider, SeasonSummary, WatchProviderGroup } from '@/domain/models/media';
-import type { CatalogRepository as CatalogRepositoryContract, PagedCatalog } from '@/domain/repositories/CatalogRepository';
-import { imageUrl } from '@/data/remote/catalog/config';
+import type { CatalogRepository as CatalogRepositoryContract, GenrePageKind, PagedCatalog } from '@/domain/repositories/CatalogRepository';
+import { imageUrl, getTmdbApiKey } from '@/data/remote/catalog/config';
+import { normalizeSearchText, rankSearchResults, type SearchPopularity } from '@/data/remote/catalog/searchRank';
 import { deviceRegion } from '@/data/remote/catalog/region';
 import { mapAniListAnime, animeEntriesToSummaries, animeSeasonEntries, mapAnimeSeason, syntheticAnimeSeason } from '@/data/remote/anilist/mappers';
 import type { AnimeSeasonEntry } from '@/data/remote/anilist/mappers';
@@ -26,11 +27,52 @@ import {
   seriesSeasonSummaries,
 } from '@/data/remote/tvdb/mappers';
 import { buildHitsRanking, HITS_MAX_PAGES, mergeHitPages, type HitCandidate } from '@/features/hits/ranking';
+import { anilistGenreFor, tvGenreIdsFor } from '@/features/genres/catalog';
 import { isPeriodComplete, parseHitsPeriod, type HitsPeriodType } from '@/features/hits/period';
 import type { GlobalHitsLive, HitsMediaType } from '@/features/hits/types';
 
 function normalizeTitle(title: string): string {
-  return title.normalize('NFKD').toLowerCase().replace(/[^\p{Letter}\p{Number}]/gu, '');
+  return normalizeSearchText(title);
+}
+
+/** Bounds a side-channel lookup so ranking never delays the visible results. */
+function withTimeout<T>(promise: Promise<T>, ms: number): Promise<T> {
+  return new Promise<T>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new CatalogError('tmdb', 'timeout')), ms);
+    promise.then(
+      (value) => { clearTimeout(timer); resolve(value); },
+      (error) => { clearTimeout(timer); reject(error); },
+    );
+  });
+}
+
+const SEARCH_POPULARITY_TIMEOUT_MS = 3_000;
+
+/**
+ * Popularity for the typed query from TMDB's own search, keyed by normalized
+ * title (TVDB ids differ, so titles are the join). Pure ranking signal — TVDB
+ * stays the only source of results. Any failure (offline, rate limit, missing
+ * key, timeout) yields an empty map and ranking falls back to text match.
+ */
+async function searchQueryPopularity(term: string, signal?: AbortSignal): Promise<SearchPopularity> {
+  if (!getTmdbApiKey()) return new Map();
+  try {
+    const [movies, tv] = await withTimeout(Promise.all([
+      tmdbClient.searchMovies(term, signal),
+      tmdbClient.searchTv(term, signal),
+    ]), SEARCH_POPULARITY_TIMEOUT_MS);
+    const popularity = new Map<string, number>();
+    const record = (title: string | undefined, score: number | undefined) => {
+      if (!title || typeof score !== 'number' || !Number.isFinite(score)) return;
+      const key = normalizeSearchText(title);
+      if (key) popularity.set(key, Math.max(popularity.get(key) ?? 0, score));
+    };
+    for (const dto of movies.results ?? []) record(dto.title, dto.popularity);
+    for (const dto of tv.results ?? []) record(dto.name, dto.popularity);
+    return popularity;
+  } catch {
+    return new Map();
+  }
 }
 
 function toHitCandidate(dto: { id: number; title?: string; name?: string; poster_path?: string | null; release_date?: string; first_air_date?: string; popularity?: number | null; vote_average?: number | null; vote_count?: number | null }, media: HitsMediaType): HitCandidate {
@@ -136,6 +178,17 @@ export function interleaveRanked(groups: readonly (readonly CatalogMedia[])[], l
   return merged;
 }
 
+/**
+ * Re-orders one provider slice so titles whose FIRST genre is the selected
+ * genre lead the shelf; multi-tagged neighbours (an Action movie that also
+ * carries Comedy) still appear, but after the pure-genre titles. Keeps every
+ * shelf full while the top always reads as the genre the user opened.
+ */
+export function primaryFirst<T>(items: readonly T[] | undefined, size: number, isPrimary: (item: T) => boolean): T[] {
+  const list = (items ?? []).slice(0, size);
+  return [...list.filter(isPrimary), ...list.filter((item) => !isPrimary(item))];
+}
+
 function orderByRecency(items: readonly CatalogMedia[], limit = 15): CatalogMedia[] {
   const seen = new Set<string>();
   return [...items]
@@ -179,6 +232,20 @@ function numericId(identity: MediaIdentity): number {
   return id;
 }
 
+/**
+ * Indian OTT platforms as pipe-joined TMDb provider ids (Netflix, Prime Video,
+ * JioHotstar, Zee5, SonyLIV, Apple TV, MUBI, Lionsgate Play, Hoichoi, aha,
+ * WeTV). The Hindi shows shelf is restricted to these so it stays an OTT
+ * shelf — pipe means "any of" and the URL layer percent-encodes it.
+ */
+const IN_OTT_TV_PROVIDERS = '8|119|2336|232|237|350|11|561|315|532|623';
+/**
+ * Vote floor for the Hindi shelf: streaming originals clear it easily
+ * (Mirzapur 194, Sacred Games 263, Panchayat 154) while daily broadcast
+ * serials do not (C.I.D. 32, Taarak Mehta 41, Kundali Bhagya 4).
+ */
+const HINDI_SHOW_MIN_VOTES = 45;
+
 export class RemoteCatalogRepository implements CatalogRepositoryContract {
   async search(query: string, filter: CatalogFilter, signal?: AbortSignal): Promise<CatalogSearchResult> {
     const term = query.trim();
@@ -189,6 +256,8 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
     if (filter === 'all' || filter === 'movies') tasks.push({ provider: 'tvdb', load: async () => (await tvdbClient.search(term, 'movie', signal)).map(mapTvdbSearchItem).filter((item): item is CatalogMedia => item !== null) });
     if (filter === 'all' || filter === 'series') tasks.push({ provider: 'tvdb', load: async () => (await tvdbClient.search(term, 'series', signal)).map(mapTvdbSearchItem).filter((item): item is CatalogMedia => item !== null && item.mediaType === 'series') });
     if (filter === 'all' || filter === 'anime') tasks.push({ provider: 'tvdb', load: async () => (await tvdbClient.search(term, 'series', signal)).map(mapTvdbSearchItem).filter((item): item is CatalogMedia => item !== null && item.mediaType === 'anime') });
+    // Ranking signal fetched in parallel; TVDB stays the only results source.
+    const popularity = searchQueryPopularity(term, signal);
     const settled = await Promise.allSettled(tasks.map((task) => task.load()));
     if (signal?.aborted) throw settled.find((result): result is PromiseRejectedResult => result.status === 'rejected')?.reason;
     const fulfilled = settled.flatMap((result) => result.status === 'fulfilled' ? [result.value] : []);
@@ -198,7 +267,11 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
       if (reason instanceof Error) throw reason;
       throw new CatalogError(tasks[0].provider, 'network');
     }
-    return { items: mergeCatalogResults(fulfilled), unavailableProviders };
+    const merged = mergeCatalogResults(fulfilled);
+    if (!merged.length) return { items: [], unavailableProviders };
+    // The exact/popular match the user typed lands first; TVDB's own order
+    // only breaks full ties, so the top title never needs scrolling to find.
+    return { items: rankSearchResults(merged, term, await popularity), unavailableProviders };
   }
 
   async getMedia(identity: MediaIdentity, signal?: AbortSignal): Promise<CatalogMedia> {
@@ -921,6 +994,111 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
       items,
       page: safePage,
       totalPages: response.lastPage ?? (response.hasNextPage ? safePage + 1 : safePage),
+    };
+  }
+
+  /**
+   * One genre shelf, scoped to what the user picked to see:
+   * - `all` mixes Hollywood/Bollywood movies, Hollywood/Bollywood shows, and
+   *   anime (series and films) in one ranked grid;
+   * - `movies` is films — English, Hindi, and Japanese originals so anime
+   *   movies always appear alongside Hollywood and Bollywood;
+   * - `shows` is English and Hindi series (Hollywood + Bollywood); Hindi is
+   *   restricted to Indian OTT platforms with a vote floor, so daily
+   *   broadcast serials never fill the shelf;
+   * - `anime` is AniList's own genre list (both TV anime and anime films);
+   *   genres AniList never tags honestly return an empty page.
+   * Every slice is ordered primary-genre-first, so a genre's purest titles
+   * always lead no matter how multi-tagged the rest of the page is. Anime
+   * joins page one of `all` only — its ranking is a single snapshot,
+   * mirroring how trending-all merges feeds.
+   */
+  async getGenrePage(page: number, genreId: number, kind: GenrePageKind, signal?: AbortSignal): Promise<PagedCatalog> {
+    const safePage = Math.max(1, Math.floor(page) || 1);
+    const size = 20;
+    if (kind === 'anime') {
+      const mapped = anilistGenreFor(genreId);
+      if (mapped === null || mapped === undefined) return { items: [], page: safePage, totalPages: safePage };
+      const response = mapped === 'all'
+        ? await anilistClient.popularAnime(safePage, 40, signal)
+        : await anilistClient.genreAnimePage(safePage, 40, mapped, signal);
+      const media = typeof mapped === 'string' && mapped !== 'all'
+        ? primaryFirst(response.media, 40, (dto) => dto.genres?.[0] === mapped)
+        : response.media;
+      return {
+        items: media.map(mapAniListAnime),
+        page: safePage,
+        totalPages: response.lastPage ?? (response.hasNextPage ? safePage + 1 : safePage),
+      };
+    }
+    const tvGenres = tvGenreIdsFor(genreId);
+    // TV Movie has no TV counterpart — the Shows shelf reports empty honestly.
+    if (kind === 'shows' && (tvGenres === null || tvGenres === undefined)) return { items: [], page: safePage, totalPages: safePage };
+    const wantsMovies = kind === 'all' || kind === 'movies';
+    const wantsShows = (kind === 'all' || kind === 'shows') && typeof tvGenres === 'string';
+    const animeGenre = anilistGenreFor(genreId);
+    const wantsAnime = kind === 'all' && animeGenre !== null && animeGenre !== undefined;
+    const withGenres = String(genreId);
+    const tvIdSet = new Set((tvGenres ?? '').split(','));
+    const isPrimaryMovie = (dto: { genre_ids?: number[] }) => dto.genre_ids?.[0] === genreId;
+    const isPrimaryShow = (dto: { genre_ids?: number[] }) => tvIdSet.has(String(dto.genre_ids?.[0]));
+    // Primary sources fail loudly (the shelf is that source); the Japanese
+    // and anime joins are optional extras, never a reason to blank the grid.
+    const [movies, shows, moviesJa, anime] = await Promise.all([
+      wantsMovies
+        ? Promise.all([
+            tmdbClient.discoverMovies(safePage, { language: 'en', withGenres }, signal),
+            tmdbClient.discoverMovies(safePage, { language: 'hi', withGenres }, signal),
+          ])
+        : null,
+      wantsShows
+        ? Promise.all([
+            tmdbClient.discoverTv(safePage, { language: 'en', withGenres: tvGenres ?? undefined }, signal),
+            tmdbClient.discoverTv(safePage, {
+              language: 'hi', withGenres: tvGenres ?? undefined,
+              watchRegion: 'IN', watchProviders: IN_OTT_TV_PROVIDERS, voteCountGte: HINDI_SHOW_MIN_VOTES,
+            }, signal),
+          ])
+        : null,
+      wantsMovies
+        ? tmdbClient.discoverMovies(safePage, { language: 'ja', withGenres }, signal).catch(() => null)
+        : Promise.resolve(null),
+      wantsAnime && safePage === 1
+        ? (animeGenre === 'all'
+            ? anilistClient.popularAnime(1, 20, signal)
+            : anilistClient.genreAnimePage(1, 20, animeGenre, signal)).catch(() => null)
+        : Promise.resolve(null),
+    ]);
+    const groups: CatalogMedia[][] = [];
+    const totals: number[] = [];
+    if (movies) {
+      groups.push(
+        primaryFirst(movies[0].results, size, isPrimaryMovie).map(mapTmdbMovie),
+        primaryFirst(movies[1].results, size, isPrimaryMovie).map(mapTmdbMovie),
+      );
+      totals.push(movies[0].total_pages ?? 1, movies[1].total_pages ?? 1);
+    }
+    if (shows) {
+      groups.push(
+        primaryFirst(shows[0].results, size, isPrimaryShow).map(mapTmdbTv),
+        primaryFirst(shows[1].results, size, isPrimaryShow).map(mapTmdbTv),
+      );
+      totals.push(shows[0].total_pages ?? 1, shows[1].total_pages ?? 1);
+    }
+    if (moviesJa?.results?.length) {
+      groups.push(primaryFirst(moviesJa.results, size, isPrimaryMovie).map(mapTmdbMovie));
+    }
+    if (anime?.media?.length) {
+      const media = typeof animeGenre === 'string' && animeGenre !== 'all'
+        ? primaryFirst(anime.media, size, (dto) => dto.genres?.[0] === animeGenre)
+        : anime.media.slice(0, size);
+      groups.push(media.map(mapAniListAnime));
+    }
+    if (!groups.length) throw new CatalogError('tmdb', 'network');
+    return {
+      items: interleaveRanked(groups, size * 2),
+      page: safePage,
+      totalPages: RemoteCatalogRepository.maxPages(totals.length ? Math.max(...totals) : 1),
     };
   }
 }

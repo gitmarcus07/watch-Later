@@ -10,7 +10,14 @@ export function LoadingView({ label = 'Loading' }: { label?: string }) {
 }
 
 export function ErrorView({ message, onRetry }: { message: string; onRetry?: () => void }) {
-  return <View style={styles.container}><AppText variant="heading3" accessibilityRole="alert">Something went wrong</AppText><AppText muted accessibilityLiveRegion="polite">{message}</AppText>{onRetry ? <AppButton label="Try again" onPress={onRetry} variant="secondary" /> : null}</View>;
+  return (
+    <View style={styles.container}>
+      <View style={styles.icon}><Ionicons name="cloud-offline-outline" size={27} color={colors.accent} /></View>
+      <AppText variant="heading3" accessibilityRole="alert" style={styles.title}>Something went wrong</AppText>
+      <AppText muted accessibilityLiveRegion="polite" style={styles.message}>{message}</AppText>
+      {onRetry ? <AppButton label="Try again" onPress={onRetry} variant="secondary" /> : null}
+    </View>
+  );
 }
 
 export function EmptyState({ title, message, icon = 'film-outline', actionLabel, onAction }: { title: string; message: string; icon?: keyof typeof Ionicons.glyphMap; actionLabel?: string; onAction?: () => void }) {

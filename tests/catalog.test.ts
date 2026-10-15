@@ -1,10 +1,12 @@
 import { CatalogError } from '@/domain/errors/CatalogError';
+import type { CatalogMedia } from '@/domain/models/media';
 import { animeEntriesToSummaries, animeSeasonEntries, mapAniListAnime, plainDescription } from '@/data/remote/anilist/mappers';
 import { anilistClient } from '@/data/remote/anilist/client';
 import { jikanClient } from '@/data/remote/jikan/client';
 import { imageUrl } from '@/data/remote/catalog/config';
 import { requestJson } from '@/data/remote/catalog/request';
 import { RemoteCatalogRepository, mergeCatalogResults } from '@/data/remote/catalog/RemoteCatalogRepository';
+import { rankSearchResults, searchMatchTier } from '@/data/remote/catalog/searchRank';
 import { mapTmdbMovie, mapTmdbSeason, mapTmdbTv } from '@/data/remote/tmdb/mappers';
 import { buildTmdbUrl, tmdbClient } from '@/data/remote/tmdb/client';
 import { tvdbClient } from '@/data/remote/tvdb/client';
@@ -203,12 +205,65 @@ describe('catalog request and provider clients', () => {
     const movieSpy = jest.spyOn(tvdbClient, 'search').mockImplementation(async (_query, type) => (
       type === 'movie' ? [searchMovie] : [searchSeries]
     ));
+    jest.spyOn(tmdbClient, 'searchMovies').mockResolvedValue({ results: [] } as never);
+    jest.spyOn(tmdbClient, 'searchTv').mockResolvedValue({ results: [] } as never);
     const result = await repo.search('A Film', 'all');
     expect(result.items.map((item) => item.id).sort()).toEqual(['tvdb:movie:42', 'tvdb:series:43'].sort());
     expect(result.unavailableProviders).toEqual([]);
     expect(movieSpy.mock.calls.map((call) => call.slice(0, 2))).toContainEqual(['A Film', 'movie']);
     jest.spyOn(tvdbClient, 'search').mockRejectedValue(new CatalogError('tvdb', 'network'));
     await expect(repo.search('A Film', 'all')).rejects.toMatchObject({ code: 'network' });
+  });
+
+  it('ranks the exact popular match first so the typed title never needs scrolling', async () => {
+    const repo = new RemoteCatalogRepository();
+    const tvdbItem = (tvdbId: string, name: string, year: string, type: 'movie' | 'series') => ({
+      objectID: `${type}-${tvdbId}`, type, tvdb_id: tvdbId, name, overview: 'Story',
+      image_url: `https://artworks.thetvdb.com/banners/posters/${tvdbId}-1.jpg`, year,
+      genres: ['Drama'], status: 'Released', primary_language: 'eng',
+    });
+    jest.spyOn(tvdbClient, 'search').mockImplementation(async (_query, type) => (
+      type === 'movie'
+        ? [tvdbItem('10', 'Off the Record', '1990', 'movie'), tvdbItem('11', 'The Office', '2005', 'movie')]
+        : [tvdbItem('20', 'The Office Chronicles', '2020', 'series')]
+    ));
+    jest.spyOn(tmdbClient, 'searchMovies').mockResolvedValue({ results: [{ id: 11, title: 'The Office', popularity: 95 }, { id: 10, title: 'Off the Record', popularity: 40 }] } as never);
+    jest.spyOn(tmdbClient, 'searchTv').mockResolvedValue({ results: [{ id: 9, name: 'The Office', popularity: 100 }, { id: 8, name: 'The Office Chronicles', popularity: 30 }] } as never);
+    const result = await repo.search('the office', 'all');
+    expect(result.items.map((item) => item.title)).toEqual(['The Office', 'The Office Chronicles', 'Off the Record']);
+  });
+
+  it('keeps search ranked by text match alone when the popularity lookup fails', async () => {
+    const repo = new RemoteCatalogRepository();
+    const tvdbItem = (tvdbId: string, name: string, type: 'movie' | 'series') => ({
+      objectID: `${type}-${tvdbId}`, type, tvdb_id: tvdbId, name, overview: 'Story',
+      image_url: `https://artworks.thetvdb.com/banners/posters/${tvdbId}-1.jpg`, year: '2010',
+      genres: ['Drama'], status: 'Released', primary_language: 'eng',
+    });
+    jest.spyOn(tvdbClient, 'search').mockImplementation(async (_query, type) => (
+      type === 'movie' ? [tvdbItem('11', 'Zeta Exact', 'movie')] : [tvdbItem('12', 'Zeta Exact Story', 'series')]
+    ));
+    jest.spyOn(tmdbClient, 'searchMovies').mockRejectedValue(new CatalogError('tmdb', 'network'));
+    jest.spyOn(tmdbClient, 'searchTv').mockRejectedValue(new CatalogError('tmdb', 'network'));
+    const result = await repo.search('Zeta Exact', 'all');
+    expect(result.items.map((item) => item.title)).toEqual(['Zeta Exact', 'Zeta Exact Story']);
+    expect(result.unavailableProviders).toEqual([]);
+  });
+
+  it('orders search results by match quality first and popularity inside each tier', () => {
+    const media = (id: string, title: string, year: number): CatalogMedia => ({
+      provider: 'tvdb', mediaType: 'series', providerId: id, id: `tvdb:series:${id}`,
+      title, year, genres: [], episodeMetadata: 'available',
+    });
+    const items = [media('1', 'Deep Cut', 2001), media('2', 'Office Party', 2002), media('3', 'Office', 2003), media('4', 'Unrelated', 2004)];
+    const popularity = new Map([['office', 10], ['officeparty', 90]]);
+    expect(rankSearchResults(items, 'office', popularity).map((item) => item.title))
+      .toEqual(['Office', 'Office Party', 'Deep Cut', 'Unrelated']);
+    expect(searchMatchTier('The Office', 'the office')).toBe(0);
+    expect(searchMatchTier('The Office (US)', 'the office')).toBe(1);
+    expect(searchMatchTier('Dunder Mifflin: The Office', 'the office')).toBe(2);
+    expect(searchMatchTier('The Ghostwriter', 'writer')).toBe(3);
+    expect(searchMatchTier('Boondock Saints', 'office')).toBe(4);
   });
 
   it('returns empty results without any provider request for whitespace', async () => {

@@ -33,3 +33,6 @@ __pycache__/
 
 # EAS local credentials (contain plaintext secrets)
 credentials.json
+
+Temp/
+Notification Specs.zip

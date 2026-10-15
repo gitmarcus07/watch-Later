@@ -1,11 +1,14 @@
+import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppError } from '@/domain/errors/AppError';
 import type { SessionState } from '@/domain/models/session';
 import { supabase } from '@/data/remote/supabase/client';
+import { clearDeviceLibrary } from '@/data/local/database/database';
+import { clearLastDeletedAccount, getLastDeletedAccount } from './deleteAccount';
 import { SqliteGuestMigrationService } from '@/data/local/repositories/SqliteGuestMigrationService';
 import type { GuestMigrationService } from '@/data/local/repositories/GuestMigrationService';
 import type { AuthService } from './sessionService';
 
-interface AuthUser { id: string; email?: string }
+interface AuthUser { id: string; email?: string; created_at?: string }
 interface AuthSession { user: AuthUser }
 interface AuthFailure { code?: string; message?: string }
 interface OAuthRedirectResult { type: string; url?: string }
@@ -20,12 +23,97 @@ interface AuthClient {
   auth: {
     signInWithPassword(input: { email: string; password: string }): Promise<{ data: { user: AuthUser | null; session: AuthSession | null }; error: AuthFailure | null }>;
     signUp(input: { email: string; password: string }): Promise<{ data: { user: AuthUser | null; session: AuthSession | null }; error: AuthFailure | null }>;
-    signInWithOAuth?(input: { provider: string; options?: { redirectTo?: string; skipBrowserRedirect?: boolean } }): Promise<{ data: { url: string | null }; error: AuthFailure | null }>;
+    signInWithOAuth?(input: { provider: string; options?: { redirectTo?: string; skipBrowserRedirect?: boolean; queryParams?: Record<string, string> } }): Promise<{ data: { url: string | null }; error: AuthFailure | null }>;
     exchangeCodeForSession?(code: string): Promise<{ error: AuthFailure | null }>;
     setSession?(input: { access_token: string; refresh_token: string }): Promise<{ error: AuthFailure | null }>;
+    getSession?(): Promise<{ data: { session: AuthSession | null } }>;
     getUser?(): Promise<{ data: { user: AuthUser | null }; error: AuthFailure | null }>;
-    signOut(): Promise<{ error: AuthFailure | null }>;
+    signOut(options?: { scope?: 'global' | 'local' | 'others' }): Promise<{ error: AuthFailure | null }>;
   };
+  functions?: {
+    invoke(functionName: string, options?: unknown): Promise<{ data: unknown; error: unknown }>;
+  };
+}
+
+/** Thrown when the device library is still bound to a different account. */
+export const DEVICE_LINKED_MESSAGE =
+  'This device library is linked to another account. Sign back into that account before syncing.';
+
+/**
+ * A device-binding refusal that keeps its Supabase session alive so the UI
+ * can clear the stale library and finish binding the SAME account without
+ * sending the user through the browser a second time.
+ */
+export class DeviceLinkedError extends AppError {
+  constructor(
+    readonly accountId: string,
+    readonly accountEmail?: string,
+  ) {
+    super('authentication', DEVICE_LINKED_MESSAGE);
+    this.name = 'DeviceLinkedError';
+  }
+}
+
+export function isDeviceLinkedError(error: unknown): boolean {
+  if (error instanceof DeviceLinkedError) return true;
+  return error instanceof AppError
+    ? error.message === DEVICE_LINKED_MESSAGE
+    : error instanceof Error && error.message.includes('linked to another account');
+}
+
+/**
+ * Intent of a Google OAuth flow. Sign-in must never auto-create an account:
+ * Supabase creates a fresh auth user on first OAuth, so a sign-in that mints
+ * a brand-new user means "no account found" and the husk is rolled back.
+ * Sign-up allows (or reuses) the account.
+ */
+export type GoogleAuthMode = 'sign-in' | 'sign-up';
+
+export const NO_GOOGLE_ACCOUNT_MESSAGE =
+  'No account found with this Google email. Create a new account first, then sign in.';
+
+/** A user created within this window is treated as minted by the current OAuth flow. */
+export const NEW_OAUTH_USER_WINDOW_MS = 120_000;
+
+const PENDING_GOOGLE_MODE_KEY = 'watch-later.google-auth-mode.v1';
+
+/**
+ * True when the auth user was created within NEW_OAUTH_USER_WINDOW_MS of
+ * now — i.e. this OAuth exchange just minted it. Missing/invalid timestamps
+ * return false so older mocked clients keep their permissive behaviour.
+ */
+export function isNewOAuthUser(
+  user: { created_at?: string } | null | undefined,
+  nowMs: number = Date.now(),
+): boolean {
+  const createdAt = user?.created_at;
+  if (!createdAt) return false;
+  const createdMs = Date.parse(createdAt);
+  if (Number.isNaN(createdMs)) return false;
+  return nowMs - createdMs >= 0 && nowMs - createdMs <= NEW_OAUTH_USER_WINDOW_MS;
+}
+
+async function setPendingGoogleMode(mode: GoogleAuthMode): Promise<void> {
+  try { await AsyncStorage.setItem(PENDING_GOOGLE_MODE_KEY, mode); } catch { /* best effort */ }
+}
+
+async function clearPendingGoogleMode(): Promise<void> {
+  try { await AsyncStorage.removeItem(PENDING_GOOGLE_MODE_KEY); } catch { /* best effort */ }
+}
+
+/**
+ * Intent stored by signInWithGoogle for the router-delivered callback
+ * (Android). Defaults to sign-up (permissive) so a lost intent can never
+ * delete a legitimate new account.
+ */
+export async function consumePendingGoogleMode(): Promise<GoogleAuthMode> {
+  try {
+    const stored = await AsyncStorage.getItem(PENDING_GOOGLE_MODE_KEY);
+    await AsyncStorage.removeItem(PENDING_GOOGLE_MODE_KEY).catch(() => undefined);
+    return stored === 'sign-in' ? 'sign-in' : 'sign-up';
+  } catch {
+    return 'sign-up';
+  }
 }
 
 function friendlyAuthError(error: AuthFailure | null, mode: 'sign-in' | 'sign-up'): AppError {
@@ -133,11 +221,33 @@ export function parseOAuthRedirect(url: string): OAuthRedirectParams {
   return params;
 }
 
+/**
+ * Set by `completeGoogleCallback` when the deep-link path finished an OAuth
+ * flow. On Android `watchlater://auth/callback` is consumed by the router
+ * before the pending browser session sees it, so `openAuthSessionAsync` comes
+ * back with a cancel while the sign-in actually succeeded — without this flag
+ * the user is shown "couldn't sign in" on top of a working session.
+ */
+let oauthFinishedByRouter = false;
+/**
+ * Carries a "no account found" rejection from the router callback to the
+ * pending `signInWithGoogle` browser session, so the sign-in screen reports
+ * the real reason instead of "was cancelled".
+ */
+let oauthNoAccountFailure: AppError | null = null;
+/**
+ * Same handoff for a device-binding refusal: the callback screen goes back
+ * silently and the pending sign-in screen owns the single "Clear & continue"
+ * dialog, finishing the SAME session without a second browser roundtrip.
+ */
+let oauthDeviceLinkFailure: DeviceLinkedError | null = null;
+
 export class SupabaseAuthService implements AuthService {
   constructor(
     private readonly authClient: AuthClient | null = supabase,
     private readonly migration: GuestMigrationService = guestMigrationService,
     private readonly oauth: OAuthDeps | null = null,
+    private readonly repairLocalLibrary: () => Promise<void> = () => clearDeviceLibrary(),
   ) {}
 
   private requireClient(): AuthClient {
@@ -145,9 +255,65 @@ export class SupabaseAuthService implements AuthService {
     return this.authClient;
   }
 
-  private async connectAccount(accountId: string): Promise<void> {
-    try { await this.migration.migrateToAccount(accountId); }
-    catch (error) { await this.requireClient().auth.signOut(); throw error; }
+  /**
+   * Binds the device library to the account. A stale binding is repaired
+   * silently (no dialog) when it can only be deletion leftovers: the account
+   * was just created, or a previous account deletion on this device hasn't
+   * been followed by a successful sign-in yet. Anything else rethrows as a
+   * DeviceLinkedError WITHOUT signing out, so the UI can clear-and-continue
+   * the same session instead of sending the user through OAuth again.
+   */
+  private async connectAccountAllowingFreshRebind(accountId: string, isFresh: boolean, accountEmail?: string): Promise<void> {
+    try {
+      await this.migration.migrateToAccount(accountId);
+      return;
+    } catch (error) {
+      if (!isDeviceLinkedError(error)) {
+        await this.requireClient().auth.signOut().catch(() => undefined);
+        throw error;
+      }
+      const linked = error instanceof DeviceLinkedError
+        ? error
+        : new DeviceLinkedError(accountId, accountEmail);
+      // Deletion leftovers repair themselves: no dialog, no second browser
+      // trip. Fresh accounts qualify on their own; any account qualifies
+      // while a deletion flag from this device is still outstanding.
+      const deletedFlag = await getLastDeletedAccount().catch(() => null);
+      if (isFresh || deletedFlag) {
+        try {
+          await this.repairLocalLibrary();
+          await this.migration.migrateToAccount(accountId);
+          return;
+        } catch {
+          // Fall through to the dialog path with the session still alive.
+        }
+      }
+      throw linked;
+    }
+  }
+
+  /**
+   * Completes a DeviceLinkedError after the user confirmed "Clear &
+   * continue": wipes the stale device library and binds the already-signed-in
+   * account. No browser roundtrip — the Supabase session was kept alive.
+   */
+  async resolveDeviceLinkAndBind(pending: DeviceLinkedError): Promise<SessionState> {
+    await this.repairLocalLibrary();
+    await this.migration.migrateToAccount(pending.accountId);
+    const email = pending.accountEmail
+      ?? (await this.requireClient().auth.getUser?.().catch(() => null))?.data.user?.email
+      ?? '';
+    await clearLastDeletedAccount();
+    return { mode: 'authenticated', userId: pending.accountId, email };
+  }
+
+  /** Signs out a session kept alive for a device-link dialog the user declined. */
+  async dismissDeviceLinkRepair(): Promise<void> {
+    await this.requireClient().auth.signOut().catch(() => undefined);
+  }
+
+  private async markAuthSuccess(): Promise<void> {
+    await clearLastDeletedAccount();
   }
 
   async continueAsGuest(): Promise<SessionState> {
@@ -157,7 +323,8 @@ export class SupabaseAuthService implements AuthService {
   async signIn(email: string, password: string): Promise<SessionState> {
     const { data, error } = await this.requireClient().auth.signInWithPassword({ email, password });
     if (error || !data.user || !data.session) throw friendlyAuthError(error, 'sign-in');
-    await this.connectAccount(data.user.id);
+    await this.connectAccountAllowingFreshRebind(data.user.id, false, data.user.email ?? email);
+    await this.markAuthSuccess();
     return { mode: 'authenticated', userId: data.user.id, email: data.user.email ?? email };
   }
 
@@ -165,8 +332,38 @@ export class SupabaseAuthService implements AuthService {
     const { data, error } = await this.requireClient().auth.signUp({ email, password });
     if (error || !data.user) throw friendlyAuthError(error, 'sign-up');
     if (!data.session) throw new AppError('authentication', 'Check your email to confirm your account, then sign in. Your local library is unchanged.');
-    await this.connectAccount(data.user.id);
+    // Email sign-up only reaches here for a brand-new user.
+    await this.connectAccountAllowingFreshRebind(data.user.id, true, data.user.email ?? email);
+    await this.markAuthSuccess();
     return { mode: 'authenticated', userId: data.user.id, email: data.user.email ?? email };
+  }
+
+  /**
+   * Id of the session currently stored on this device, or null when signed
+   * out. Used to tell a pre-existing session apart from the one an OAuth flow
+   * just produced.
+   */
+  private async storedUserId(): Promise<string | null> {
+    const session = (await this.requireClient().auth.getSession?.())?.data.session ?? null;
+    return session?.user.id ?? null;
+  }
+
+  /**
+   * True when the stored session still belongs to a live account. A session
+   * left behind by a deleted account is perfectly valid locally but must never
+   * be adopted as the result of a sign-in.
+   */
+  private async isLiveSession(): Promise<boolean> {
+    const client = this.requireClient();
+    if (!client.auth.getUser) return true;
+    try {
+      const { data, error } = await client.auth.getUser();
+      if (error || !data.user) return false;
+      return true;
+    } catch {
+      // Offline: the session cannot be disproven, so it stays usable.
+      return true;
+    }
   }
 
   /**
@@ -174,35 +371,163 @@ export class SupabaseAuthService implements AuthService {
    * Expo Go, dev builds, and standalone apps — the browser redirect is
    * intercepted, so no `auth/callback` route is needed. Requires the Google
    * provider + redirect URLs configured in the Supabase dashboard.
+   *
+   * `mode` separates sign-in from sign-up: Supabase mints a fresh auth user
+   * on first OAuth, so a sign-in that mints one means no account exists — the
+   * husk is rolled back and "No account found" is thrown instead of silently
+   * signing into an empty account (e.g. right after account deletion).
    */
-  async signInWithGoogle(): Promise<SessionState> {
+  async signInWithGoogle(mode: GoogleAuthMode = 'sign-in'): Promise<SessionState> {
     const client = this.requireClient();
     const deps = this.oauth ?? loadOAuthDeps();
     if (!client.auth.signInWithOAuth) throw new AppError('configuration', 'Google sign-in is unavailable in this build.');
-    const { data, error } = await client.auth.signInWithOAuth({
-      provider: 'google',
-      options: { redirectTo: deps.redirectUri, skipBrowserRedirect: true },
-    });
-    if (error || !data?.url) throw friendlyAuthError(error, 'sign-in');
-    const result = await deps.browser.openAuthSessionAsync(data.url, deps.redirectUri).catch(() => ({ type: 'dismiss' }) as OAuthRedirectResult);
-    if (result.type === 'cancel' || result.type === 'dismiss') throw new AppError('authentication', 'Google sign-in was cancelled.');
-    if (result.type !== 'success' || !result.url) throw new AppError('authentication', 'Google sign-in did not complete. Please try again.');
-    const params = parseOAuthRedirect(result.url);
-    if (params.error) throw new AppError('authentication', params.errorDescription ?? 'Google sign-in was declined. Please try again.');
-    if (params.code && client.auth.exchangeCodeForSession) {
-      const { error: exchangeError } = await client.auth.exchangeCodeForSession(params.code);
-      if (exchangeError) throw friendlyAuthError(exchangeError, 'sign-in');
-    } else if (params.accessToken && params.refreshToken && client.auth.setSession) {
-      const { error: sessionError } = await client.auth.setSession({ access_token: params.accessToken, refresh_token: params.refreshToken });
-      if (sessionError) throw friendlyAuthError(sessionError, 'sign-in');
-    } else {
-      throw new AppError('authentication', 'Google sign-in did not return a session. Please try again.');
+    oauthFinishedByRouter = false;
+    oauthNoAccountFailure = null;
+    oauthDeviceLinkFailure = null;
+    await setPendingGoogleMode(mode);
+    try {
+      const sessionBefore = await this.storedUserId();
+      const { data, error } = await client.auth.signInWithOAuth({
+        provider: 'google',
+        // `prompt: select_account` forces the Google chooser every time.
+        // Without it the system browser reuses its Google cookies and silently
+        // signs in with the last-used Google profile.
+        options: { redirectTo: deps.redirectUri, skipBrowserRedirect: true, queryParams: { prompt: 'select_account' } },
+      });
+      if (error || !data?.url) throw friendlyAuthError(error, mode);
+      const result = await deps.browser.openAuthSessionAsync(data.url, deps.redirectUri).catch(() => ({ type: 'dismiss' }) as OAuthRedirectResult);
+      // The router callback may have rejected a sign-in that minted a new
+      // account, or hit a stale device binding. Surface that reason instead
+      // of "was cancelled".
+      if (oauthNoAccountFailure) throw oauthNoAccountFailure;
+      if (oauthDeviceLinkFailure) throw oauthDeviceLinkFailure;
+      // On Android the router wins the redirect, so `auth/callback` may already
+      // have exchanged this code. Trusting it here avoids exchanging it twice.
+      const finishedByRouter = oauthFinishedByRouter;
+      oauthFinishedByRouter = false;
+      if (result.type === 'success' && result.url && !finishedByRouter) {
+        const params = parseOAuthRedirect(result.url);
+        if (params.error) throw new AppError('authentication', params.errorDescription ?? 'Google sign-in was declined. Please try again.');
+        if (params.code) return this.exchangeGoogleCode(params.code, mode);
+        if (params.accessToken && params.refreshToken) return this.setGoogleSession(params.accessToken, params.refreshToken, mode);
+        throw new AppError('authentication', 'Google sign-in did not return a session. Please try again.');
+      }
+      // The browser session came back empty-handed but the flow may still have
+      // completed elsewhere (or produced a brand-new session). Reporting that as
+      // a failure is what put "couldn't sign in" on top of a working sign-in.
+      const sessionAfter = await this.storedUserId();
+      if ((finishedByRouter || sessionAfter !== sessionBefore) && (await this.isLiveSession())) return this.authenticatedSession(mode);
+      if (oauthNoAccountFailure) throw oauthNoAccountFailure;
+      if (oauthDeviceLinkFailure) throw oauthDeviceLinkFailure;
+      if (result.type === 'cancel' || result.type === 'dismiss') throw new AppError('authentication', 'Google sign-in was cancelled.');
+      throw new AppError('authentication', 'Google sign-in did not complete. Please try again.');
+    } finally {
+      await clearPendingGoogleMode();
     }
-    const userResult = await client.auth.getUser?.();
-    const user = userResult?.data.user;
+  }
+
+  /**
+   * Finishes a Google sign-in whose redirect was delivered to Expo Router
+   * rather than to `openAuthSessionAsync`.
+   *
+   * On Android the `watchlater://auth/callback` intent resolves to the
+   * `auth/callback` route before the pending browser session ever sees it, so
+   * that screen calls this with the params from the landing URL. When the
+   * caller omits `mode`, the intent stored by `signInWithGoogle` is used.
+   */
+  async completeGoogleCallback(
+    params: { code?: string; accessToken?: string; refreshToken?: string; error?: string; errorDescription?: string },
+    mode?: GoogleAuthMode,
+  ): Promise<SessionState> {
+    const resolvedMode = mode ?? await consumePendingGoogleMode();
+    try {
+      const session = await this.resolveGoogleCallback(params, resolvedMode);
+      // Only a completed flow unblocks the pending browser session.
+      oauthFinishedByRouter = true;
+      return session;
+    } catch (cause) {
+      if (cause instanceof AppError && cause.message === NO_GOOGLE_ACCOUNT_MESSAGE) {
+        // Unblock the pending browser session and hand it the real reason.
+        oauthFinishedByRouter = true;
+        oauthNoAccountFailure = cause;
+      } else if (cause instanceof DeviceLinkedError) {
+        // The sign-in screen owns the single "Clear & continue" dialog and
+        // finishes the same session — no toast, no second browser trip.
+        oauthFinishedByRouter = true;
+        oauthDeviceLinkFailure = cause;
+      }
+      throw cause;
+    }
+  }
+
+  private async resolveGoogleCallback(
+    params: { code?: string; accessToken?: string; refreshToken?: string; error?: string; errorDescription?: string },
+    mode: GoogleAuthMode,
+  ): Promise<SessionState> {
+    if (params.error) throw new AppError('authentication', params.errorDescription ?? 'Google sign-in was declined. Please try again.');
+    if (params.code) {
+      // Always exchange the delivered code. Short-circuiting to whatever
+      // session is already stored is what signed users back in with the
+      // account they had just deleted. The stored session is only a fallback
+      // for the Expo Go case, where the browser session consumed the code
+      // first and a second exchange would fail on an already-used code.
+      try {
+        return await this.exchangeGoogleCode(params.code, mode);
+      } catch (cause) {
+        if (cause instanceof AppError && cause.message === NO_GOOGLE_ACCOUNT_MESSAGE) throw cause;
+        if (cause instanceof DeviceLinkedError) throw cause;
+        if (await this.isLiveSession()) return this.authenticatedSession(mode);
+        throw cause;
+      }
+    }
+    if (params.accessToken && params.refreshToken) return this.setGoogleSession(params.accessToken, params.refreshToken, mode);
+    if (await this.isLiveSession()) return this.authenticatedSession(mode);
+    throw new AppError('authentication', 'Google sign-in did not return a session. Please try again.');
+  }
+
+  private async exchangeGoogleCode(code: string, mode: GoogleAuthMode = 'sign-up'): Promise<SessionState> {
+    const client = this.requireClient();
+    if (!client.auth.exchangeCodeForSession) throw new AppError('authentication', 'Google sign-in did not return a session. Please try again.');
+    const { error } = await client.auth.exchangeCodeForSession(code);
+    if (error) throw friendlyAuthError(error, mode);
+    return this.authenticatedSession(mode);
+  }
+
+  private async setGoogleSession(accessToken: string, refreshToken: string, mode: GoogleAuthMode = 'sign-up'): Promise<SessionState> {
+    const client = this.requireClient();
+    if (!client.auth.setSession) throw new AppError('authentication', 'Google sign-in did not return a session. Please try again.');
+    const { error } = await client.auth.setSession({ access_token: accessToken, refresh_token: refreshToken });
+    if (error) throw friendlyAuthError(error, mode);
+    return this.authenticatedSession(mode);
+  }
+
+  private async authenticatedSession(mode: GoogleAuthMode = 'sign-up'): Promise<SessionState> {
+    const client = this.requireClient();
+    const user = (await client.auth.getUser?.())?.data.user;
     if (!user) throw new AppError('authentication', 'Google sign-in did not return an account. Please try again.');
-    await this.connectAccount(user.id);
+    // Sign-in must never adopt an account this flow just created (e.g. the
+    // same Google email right after account deletion). Check before the local
+    // library is bound so nothing is migrated onto the husk.
+    if (mode === 'sign-in' && isNewOAuthUser(user)) {
+      await this.rollbackAutoCreatedUser();
+      throw new AppError('authentication', NO_GOOGLE_ACCOUNT_MESSAGE);
+    }
+    await this.connectAccountAllowingFreshRebind(user.id, mode === 'sign-up' && isNewOAuthUser(user), user.email);
+    await this.markAuthSuccess();
     return { mode: 'authenticated', userId: user.id, email: user.email ?? '' };
+  }
+
+  /**
+   * Best-effort rollback of an auto-created OAuth husk: deletes the fresh
+   * auth user via the `delete-account` edge function (which cascades its
+   * empty rows), then clears the local session so nothing lingers. Never
+   * throws — the caller always reports "No account found".
+   */
+  private async rollbackAutoCreatedUser(): Promise<void> {
+    const client = this.requireClient();
+    try { await client.functions?.invoke('delete-account', {}); } catch { /* husk may linger; sign-out still clears the device */ }
+    try { await client.auth.signOut(); } catch { /* ignored */ }
+    try { await client.auth.signOut({ scope: 'local' }); } catch { /* ignored */ }
   }
 
   async signOut(): Promise<void> {

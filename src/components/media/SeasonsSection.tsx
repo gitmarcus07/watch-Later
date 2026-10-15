@@ -1,15 +1,15 @@
 import { useEffect, useRef, useState } from 'react';
-import { Pressable, StyleSheet, View } from 'react-native';
+import { ActivityIndicator, Pressable, StyleSheet, View } from 'react-native';
 import { Ionicons } from '@expo/vector-icons';
 import { AppText } from '@/components/common/AppText';
-import { EpisodeList } from '@/components/media/EpisodeList';
+import { EpisodeList, hasAired } from '@/components/media/EpisodeList';
 import { SetProgressDialog } from '@/components/media/SetProgressDialog';
 import { EmptyState, ErrorView, EpisodeListSkeleton, LoadingView } from '@/components/feedback/FeedbackViews';
 import { showDialog, showToast } from '@/components/feedback/AppDialog';
 import { CatalogError } from '@/domain/errors/CatalogError';
 import type { CatalogMedia, CatalogSeason, MediaEpisode, SeasonSummary } from '@/domain/models/media';
 import type { SeriesProgress } from '@/domain/models/watchState';
-import { useCatalogSeason } from '@/features/catalog/hooks';
+import { fetchCatalogSeason, useCatalogSeason } from '@/features/catalog/hooks';
 import { useAnimeWatchedCount, useCachedSeason, useSeriesTrackingStatus, useStoreSeason, useToggleEpisode, useToggleSeason } from '@/features/watchState/hooks';
 import { watchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
 import { markUpToHere } from '@/features/watchState/status';
@@ -31,10 +31,13 @@ function SeasonCard({ media, summary, expanded, onToggleExpand, onSetProgress, o
   // Heavy season payloads load lazily: only the open card hits the network or
   // SQLite episode tables, so opening a show never fires N parallel fetches.
   // Anime cards pass their summary so episodes resolve from its refs without
-  // re-walking the franchise chain.
+  // re-walking the franchise chain. The header checkbox pulls that same cached
+  // payload on demand, which is what makes it work before the card is expanded.
+  const [onDemandSeason, setOnDemandSeason] = useState<CatalogSeason | undefined>(undefined);
+  const [pullingSeason, setPullingSeason] = useState(false);
   const seasonQuery = useCatalogSeason(identity, expanded ? summary.seasonNumber : undefined, summary);
   const localSeasonQuery = useCachedSeason(identity, expanded ? summary.seasonNumber : undefined);
-  const season: CatalogSeason | undefined = seasonQuery.data ?? localSeasonQuery.data ?? undefined;
+  const season: CatalogSeason | undefined = seasonQuery.data ?? localSeasonQuery.data ?? onDemandSeason;
   const emptySeason: CatalogSeason = { series: identity, seasonNumber: summary.seasonNumber, name: summary.name, episodes: [] };
   const episodeMutation = useToggleEpisode(media, season ?? emptySeason);
   const watchedIds = episodeMutation.watchedIds;
@@ -51,25 +54,68 @@ function SeasonCard({ media, summary, expanded, onToggleExpand, onSetProgress, o
     storeSeasonMutation.mutate(seasonQuery.data);
   }, [expanded, trackingStatus.data, seasonQuery.data, storeSeasonMutation, summary.seasonNumber]);
 
-  const episodeCount = season?.episodes.length ?? summary.episodeCount ?? 0;
-  const watchedCount = season?.episodes.length
-    ? season.episodes.filter((episode) => watchedIds.includes(episode.providerId)).length
+  const episodes = season?.episodes ?? [];
+  // Weekly shows publish one episode at a time, so only what has already
+  // aired can be marked — the rest is locked until its air date arrives.
+  const releasedEpisodes = episodes.filter((episode) => hasAired(episode.airDate));
+  const episodeCount = episodes.length || summary.episodeCount || 0;
+  const watchedCount = episodes.length
+    ? episodes.filter((episode) => watchedIds.includes(episode.providerId)).length
     : Math.min(watchedIds.length, episodeCount);
-  const allWatched = episodeCount > 0 && watchedCount >= episodeCount;
+  // Collapsed cards have no episode rows loaded, so fall back to the counts —
+  // a finished season (10/10) must read as watched in both states.
+  const allWatched = episodes.length
+    ? releasedEpisodes.length > 0 && releasedEpisodes.every((episode) => watchedIds.includes(episode.providerId))
+    : episodeCount > 0 && watchedCount >= episodeCount;
   const busy = episodeMutation.isPending || toggleSeasonMutation.isPending;
+  const supportsSeasonLoad =
+    (identity.provider === 'tmdb' && identity.mediaType === 'series')
+    || (identity.provider === 'anilist' && identity.mediaType === 'anime')
+    || (identity.provider === 'tvdb' && identity.mediaType !== 'movie');
 
-  const toggleSeason = () => {
-    if (!season?.episodes.length) return;
+  const applySeasonToggle = (target: CatalogSeason) => {
+    // Only the aired rows are written; unreleased episodes are never marked.
+    const aired = target.episodes.filter((episode) => hasAired(episode.airDate));
+    if (!aired.length) {
+      triggerLightHaptic();
+      showToast(`None of ${summary.name} has aired yet`, 'info');
+      return;
+    }
+    const watchedNow = aired.every((episode) => watchedIds.includes(episode.providerId));
     triggerLightHaptic();
-    toggleSeasonMutation.mutate({ watched: !allWatched, season }, {
+    toggleSeasonMutation.mutate({ watched: !watchedNow, season: { ...target, episodes: aired } }, {
       onSuccess: () => {
         triggerSuccessHaptic();
         void queryClient.invalidateQueries({ queryKey: ['watch'] });
         scheduleAutoSync('mutation');
-        showToast(allWatched ? `${summary.name} marked unwatched` : `${summary.name} marked watched`, allWatched ? 'info' : 'success');
+        showToast(watchedNow ? `${summary.name} marked unwatched` : `${summary.name} marked watched`, watchedNow ? 'info' : 'success');
       },
       onError: (error) => void showDialog({ type: 'error', title: 'Couldn’t update this season', message: friendlyErrorMessage(error) }),
     });
+  };
+
+  const toggleSeason = async () => {
+    if (busy || pullingSeason) return;
+    if (season?.episodes.length) { applySeasonToggle(season); return; }
+    if (!supportsSeasonLoad) {
+      triggerLightHaptic();
+      showToast('Episodes for this season aren’t available yet', 'info');
+      return;
+    }
+    // Nothing loaded yet: pull the payload the expanded card would use, then
+    // toggle it, so the checkbox works without opening the card first.
+    triggerLightHaptic();
+    setPullingSeason(true);
+    try {
+      const loaded = await fetchCatalogSeason(identity, summary.seasonNumber, summary);
+      setOnDemandSeason(loaded);
+      if (loaded.episodes.length) applySeasonToggle(loaded);
+      else showToast('Episodes for this season aren’t available yet', 'info');
+    } catch (error) {
+      void showDialog({ type: 'error', title: 'Couldn’t load this season', message: friendlyErrorMessage(error) });
+    } finally {
+      setPullingSeason(false);
+    }
   };
 
   return (
@@ -91,12 +137,15 @@ function SeasonCard({ media, summary, expanded, onToggleExpand, onSetProgress, o
         <Pressable
           accessibilityRole="checkbox"
           accessibilityLabel={`Mark ${summary.name} ${allWatched ? 'unwatched' : 'watched'}`}
-          accessibilityState={{ checked: allWatched, disabled: !season?.episodes.length || busy }}
-          disabled={!season?.episodes.length || busy}
-          onPress={toggleSeason}
+          accessibilityState={{ checked: allWatched, disabled: busy || pullingSeason, busy: pullingSeason }}
+          disabled={busy || pullingSeason}
+          onPress={() => void toggleSeason()}
           hitSlop={8}
+          style={styles.seasonToggle}
         >
-          <Ionicons name={allWatched ? 'checkmark-circle' : 'ellipse-outline'} size={24} color={allWatched ? colors.success : colors.textMuted} />
+          {pullingSeason ? <ActivityIndicator size="small" color={colors.accent} /> : (
+            <Ionicons name={allWatched ? 'checkmark-circle' : 'ellipse-outline'} size={24} color={allWatched ? colors.success : colors.textMuted} />
+          )}
         </Pressable>
       </View>
       {expanded ? (
@@ -153,10 +202,12 @@ export function SeasonsSection({ media, progress, initialSeasonNumber }: {
   const saveUpToHere = (seasonNumber: number, episodeNumber: number) => {
     setBusy(true);
     triggerLightHaptic();
-    markUpToHere(media, seasonNumber, episodeNumber).then(() => {
+    markUpToHere(media, seasonNumber, episodeNumber).then((marked) => {
       triggerSuccessHaptic();
       refresh();
-      showToast(`Marked up to S${seasonNumber}E${episodeNumber}`, 'success');
+      // Weekly shows clamp the position to what has aired, so report the
+      // position that was actually written.
+      showToast(marked === episodeNumber ? `Marked up to S${seasonNumber}E${episodeNumber}` : `Marked up to S${seasonNumber}E${marked} — later episodes haven’t aired`, 'success');
     }).catch((error: unknown) => {
       void showDialog({ type: 'error', title: 'Couldn’t update episodes', message: friendlyErrorMessage(error) });
     }).finally(() => setBusy(false));
@@ -181,7 +232,7 @@ export function SeasonsSection({ media, progress, initialSeasonNumber }: {
   return (
     <View style={styles.container}>
       <AppText variant="caption" muted>
-        {progress && denominator > 0 ? `${progress.watchedEpisodeCount}/${denominator} episodes watched · ` : ''}Tap an episode to toggle it · long-press marks up to here
+        {progress && denominator > 0 ? `${progress.watchedEpisodeCount}/${denominator} episodes watched · ` : ''}Tap an episode to toggle it · long-press marks up to here · episodes that haven’t aired stay locked
       </AppText>
       {media.mediaType === 'anime' ? <AnimeLegacyCountImporter media={media} progress={progress} /> : null}
       {summaries.map((summary) => (
@@ -287,6 +338,7 @@ const styles = StyleSheet.create({
   container: { gap: spacing.md },  card: { backgroundColor: colors.surface, borderWidth: 1, borderColor: colors.border, borderRadius: radius.medium, overflow: 'hidden' },
   cardHeader: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, paddingLeft: spacing.lg, paddingRight: spacing.md, paddingVertical: spacing.sm, minHeight: 60 },
   cardTitle: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: spacing.md },
+  seasonToggle: { width: 40, height: 40, alignItems: 'center', justifyContent: 'center' },
   cardCopy: { flex: 1, gap: 2 },
   cardBody: { paddingHorizontal: spacing.lg, paddingBottom: spacing.lg, gap: spacing.sm },
   link: { color: colors.accent },

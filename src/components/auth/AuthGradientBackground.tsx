@@ -40,7 +40,7 @@ function Orb({ style, color, size, duration, dx, dy, delay = 0 }: {
       { translateY: t.value * dy },
       { scale: 1 + t.value * 0.18 },
     ],
-    opacity: 0.5 + t.value * 0.25,
+    opacity: 0.18 + t.value * 0.12,
   }));
   return (
     <Animated.View
@@ -55,16 +55,16 @@ export function AuthGradientBackground() {
   useEffect(() => {
     sheen.value = withRepeat(withTiming(1, { duration: 9000, easing: Easing.inOut(Easing.ease) }), -1, true);
   }, [sheen]);
-  const sheenStyle = useAnimatedStyle(() => ({ opacity: 0.25 + sheen.value * 0.3 }));
+  const sheenStyle = useAnimatedStyle(() => ({ opacity: 0.1 + sheen.value * 0.12 }));
 
   return (
     <View style={StyleSheet.absoluteFill} pointerEvents="none">
-      <LinearGradient colors={['#070312', '#150826', '#0A0A0C']} start={{ x: 0, y: 0 }} end={{ x: 0.6, y: 1 }} style={StyleSheet.absoluteFill} />
-      <Orb style={{ top: -H * 0.06, left: -W * 0.25 }} color="#7C3AED" size={W * 0.95} duration={11000} dx={W * 0.14} dy={H * 0.05} />
-      <Orb style={{ top: H * 0.3, left: W * 0.45 }} color="#A855F7" size={W * 0.8} duration={14000} dx={-W * 0.16} dy={H * 0.06} delay={1200} />
-      <Orb style={{ top: H * 0.68, left: -W * 0.3 }} color="#4C1D95" size={W * 0.9} duration={17000} dx={W * 0.12} dy={-H * 0.05} delay={2400} />
+      <LinearGradient colors={['#070312', '#12071F', '#0A0A0C']} start={{ x: 0, y: 0 }} end={{ x: 0.6, y: 1 }} style={StyleSheet.absoluteFill} />
+      <Orb style={{ top: -H * 0.06, left: -W * 0.25 }} color="#4C1D95" size={W * 0.95} duration={11000} dx={W * 0.14} dy={H * 0.05} />
+      <Orb style={{ top: H * 0.3, left: W * 0.45 }} color="#6D28D9" size={W * 0.8} duration={14000} dx={-W * 0.16} dy={H * 0.06} delay={1200} />
+      <Orb style={{ top: H * 0.68, left: -W * 0.3 }} color="#3B0764" size={W * 0.9} duration={17000} dx={W * 0.12} dy={-H * 0.05} delay={2400} />
       <Animated.View style={[StyleSheet.absoluteFill, sheenStyle]}>
-        <LinearGradient colors={['rgba(168,85,247,0.14)', 'transparent', 'rgba(7,3,18,0.5)']} start={{ x: 0.5, y: 0 }} end={{ x: 0.5, y: 1 }} style={StyleSheet.absoluteFill} />
+        <LinearGradient colors={['rgba(168,85,247,0.07)', 'transparent', 'rgba(7,3,18,0.55)']} start={{ x: 0.5, y: 0 }} end={{ x: 0.5, y: 1 }} style={StyleSheet.absoluteFill} />
       </Animated.View>
     </View>
   );

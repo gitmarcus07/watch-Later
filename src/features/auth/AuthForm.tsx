@@ -9,7 +9,8 @@ import { IconButton } from '@/components/buttons/IconButton';
 import { Screen } from '@/components/common/Screen';
 import { AuthGradientBackground } from '@/components/auth/AuthGradientBackground';
 import { showDialog } from '@/components/feedback/AppDialog';
-import { SupabaseAuthService } from './SupabaseAuthService';
+import { DeviceLinkedError, NO_GOOGLE_ACCOUNT_MESSAGE, SupabaseAuthService, isDeviceLinkedError } from './SupabaseAuthService';
+import type { SessionState } from '@/domain/models/session';
 import { scheduleAutoSync } from '@/features/sync/autoSync';
 import { persistSession } from '@/store/app/sessionPersistence';
 import { useSessionStore } from '@/store/app/sessionStore';
@@ -39,19 +40,78 @@ export function AuthForm({ mode }: { mode: Mode }) {
   const setOnboardingComplete = useSessionStore((store) => store.setOnboardingComplete);
   const isSignUp = mode === 'sign-up';
 
+  async function finishAuth(session: SessionState) {
+    await persistSession(session, true);
+    setSession(session); setOnboardingComplete(true);
+    if (session.mode === 'authenticated') scheduleAutoSync('auth');
+    router.replace('/(tabs)');
+  }
+
+  /**
+   * Device-link recovery without a second browser trip: the Supabase session
+   * from the just-completed sign-in is still alive, so confirming only wipes
+   * the stale device library and binds that SAME account. Returns true when
+   * the retry finished auth (caller should return early).
+   */
+  async function offerLinkedResetAndContinue(pending: DeviceLinkedError): Promise<boolean> {
+    const confirmed = await showDialog({
+      type: 'warning',
+      title: 'Device library linked elsewhere',
+      message: 'This device library belongs to a different account. Clear it and continue? Anything already synced stays safe in the other account.',
+      primaryAction: { label: 'Clear & continue', destructive: true },
+      secondaryAction: { label: 'Cancel' },
+    });
+    if (!confirmed) {
+      await authService.dismissDeviceLinkRepair();
+      return false;
+    }
+    const session = await authService.resolveDeviceLinkAndBind(pending);
+    await finishAuth(session);
+    return true;
+  }
+
+  /** Legacy fallback for link errors without a live session: re-run the attempt. */
+  async function offerLinkedResetAndRetry(retry: () => Promise<void>): Promise<boolean> {
+    const confirmed = await showDialog({
+      type: 'warning',
+      title: 'Device library linked elsewhere',
+      message: 'This device library belongs to a different account. Clear it and continue? Anything already synced stays safe in the other account.',
+      primaryAction: { label: 'Clear & continue', destructive: true },
+      secondaryAction: { label: 'Cancel' },
+    });
+    if (!confirmed) return false;
+    await retry();
+    return true;
+  }
+
   async function submit() {
     const normalizedEmail = email.trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) { setError('Enter a valid email address.'); return; }
     if (!password) { setError('Enter your password.'); return; }
     if (isSignUp && password !== confirmPassword) { setError('Passwords do not match.'); return; }
     setLoading(true); setError('');
-    try {
+    const attempt = async () => {
       const session = isSignUp ? await authService.createAccount(normalizedEmail, password) : await authService.signIn(normalizedEmail, password);
-      await persistSession(session, true);
-      setSession(session); setOnboardingComplete(true);
-      if (session.mode === 'authenticated') scheduleAutoSync('auth');
-      router.replace('/(tabs)');
+      await finishAuth(session);
+    };
+    try {
+      await attempt();
     } catch (cause) {
+      if (cause instanceof DeviceLinkedError) {
+        try {
+          if (await offerLinkedResetAndContinue(cause)) return;
+        } catch (retryCause) {
+          setError(retryCause instanceof Error ? retryCause.message : 'Unable to connect to your account. Try again.');
+          return;
+        }
+      } else if (isDeviceLinkedError(cause)) {
+        try {
+          if (await offerLinkedResetAndRetry(attempt)) return;
+        } catch (retryCause) {
+          setError(retryCause instanceof Error ? retryCause.message : 'Unable to connect to your account. Try again.');
+          return;
+        }
+      }
       setError(cause instanceof Error ? cause.message : 'Unable to connect to your account. Try again.');
     } finally { setLoading(false); }
   }
@@ -67,13 +127,28 @@ export function AuthForm({ mode }: { mode: Mode }) {
   async function continueWithGoogle() {
     if (googleLoading || loading) return;
     setGoogleLoading(true); setError('');
+    const attempt = async () => {
+      const session = await authService.signInWithGoogle(isSignUp ? 'sign-up' : 'sign-in');
+      await finishAuth(session);
+    };
     try {
-      const session = await authService.signInWithGoogle();
-      await persistSession(session, true);
-      setSession(session); setOnboardingComplete(true);
-      if (session.mode === 'authenticated') scheduleAutoSync('auth');
-      router.replace('/(tabs)');
+      await attempt();
     } catch (cause) {
+      if (cause instanceof DeviceLinkedError) {
+        try {
+          if (await offerLinkedResetAndContinue(cause)) return;
+        } catch (retryCause) {
+          setError(retryCause instanceof Error ? retryCause.message : 'Google sign-in failed. Please try again.');
+          return;
+        }
+      } else if (isDeviceLinkedError(cause)) {
+        try {
+          if (await offerLinkedResetAndRetry(attempt)) return;
+        } catch (retryCause) {
+          setError(retryCause instanceof Error ? retryCause.message : 'Google sign-in failed. Please try again.');
+          return;
+        }
+      }
       setError(cause instanceof Error ? cause.message : 'Google sign-in failed. Please try again.');
     } finally { setGoogleLoading(false); }
   }
@@ -93,28 +168,38 @@ export function AuthForm({ mode }: { mode: Mode }) {
       <View style={styles.accentBar} />
       <AppText muted style={styles.description}>{isSignUp ? 'Create an account to sync your collection. Your local library will be merged safely.' : 'Sign in to sync your collection across devices.'}</AppText>
     </Animated.View>
+    <Animated.View entering={FadeInDown.delay(170).duration(550)} style={styles.googleBlock}>
+      <Pressable accessibilityRole="button" accessibilityLabel={isSignUp ? 'Sign up with Google' : 'Sign in with Google'} accessibilityHint={isSignUp ? 'Creates a new account with your Google email.' : 'Signs in with your existing Google account.'} accessibilityState={{ disabled: loading || googleLoading, busy: googleLoading }} disabled={loading || googleLoading} onPress={() => void continueWithGoogle()} style={({ pressed }) => [styles.google, pressed && !(loading || googleLoading) && styles.googlePressed]}>
+        {googleLoading ? <ActivityIndicator color="#1A1A1A" /> : <Ionicons name="logo-google" size={19} color="#1A1A1A" />}
+        <AppText variant="button" style={styles.googleLabel}>{isSignUp ? 'Sign up with Google' : 'Sign in with Google'}</AppText>
+      </Pressable>
+      <View style={styles.recommended}><Ionicons name="flash" size={11} color={colors.accent} /><AppText variant="caption" muted>Fastest — no password, no verification email</AppText></View>
+    </Animated.View>
+
+    <View style={styles.divider}><View style={styles.dividerLine} /><AppText variant="caption" muted>or continue with email</AppText><View style={styles.dividerLine} /></View>
+
     <View style={styles.fields}>
-      <Animated.View entering={FadeInDown.delay(170).duration(550)}>
+      <Animated.View entering={FadeInDown.delay(360).duration(550)}>
         <TextInput accessibilityLabel="Email address" autoCapitalize="none" autoComplete="email" keyboardType="email-address" textContentType="emailAddress" value={email} onChangeText={setEmail} onFocus={() => setFocused('email')} onBlur={() => setFocused(null)} placeholder="Email address" placeholderTextColor={colors.textMuted} style={fieldStyle('email')} returnKeyType="next" selectionColor={colors.accent} />
       </Animated.View>
-      <Animated.View entering={FadeInDown.delay(240).duration(550)}>
+      <Animated.View entering={FadeInDown.delay(430).duration(550)}>
         <TextInput accessibilityLabel="Password" autoCapitalize="none" autoComplete={isSignUp ? 'new-password' : 'password'} textContentType={isSignUp ? 'newPassword' : 'password'} secureTextEntry value={password} onChangeText={setPassword} onFocus={() => setFocused('password')} onBlur={() => setFocused(null)} placeholder="Password" placeholderTextColor={colors.textMuted} style={fieldStyle('password')} returnKeyType={isSignUp ? 'next' : 'done'} onSubmitEditing={() => { if (!isSignUp) void submit(); }} selectionColor={colors.accent} />
       </Animated.View>
       {isSignUp ? (
-        <Animated.View entering={FadeInDown.delay(310).duration(550)}>
+        <Animated.View entering={FadeInDown.delay(500).duration(550)}>
           <TextInput accessibilityLabel="Confirm password" autoCapitalize="none" secureTextEntry value={confirmPassword} onChangeText={setConfirmPassword} onFocus={() => setFocused('confirm')} onBlur={() => setFocused(null)} placeholder="Confirm password" placeholderTextColor={colors.textMuted} style={fieldStyle('confirm')} returnKeyType="done" onSubmitEditing={() => void submit()} selectionColor={colors.accent} />
         </Animated.View>
       ) : null}
     </View>
     {error ? <AppText accessibilityRole="alert" style={styles.error}>{error}</AppText> : null}
-    <Animated.View entering={FadeInDown.delay(360).duration(550)} style={styles.actions}>
-      <AppButton label={isSignUp ? 'Create account' : 'Sign in'} onPress={() => void submit()} loading={loading} disabled={loading || googleLoading} icon={<Ionicons name={isSignUp ? 'person-add-outline' : 'log-in-outline'} size={18} color={colors.background} />} />
-      <Pressable accessibilityRole="button" accessibilityLabel="Continue with Google" accessibilityState={{ disabled: loading || googleLoading, busy: googleLoading }} disabled={loading || googleLoading} onPress={() => void continueWithGoogle()} style={({ pressed }) => [styles.google, pressed && !(loading || googleLoading) && styles.googlePressed]}>
-        {googleLoading ? <ActivityIndicator color="#1A1A1A" /> : <Ionicons name="logo-google" size={18} color="#1A1A1A" />}
-        <AppText variant="button" style={styles.googleLabel}>Continue with Google</AppText>
+    {!isSignUp && error === NO_GOOGLE_ACCOUNT_MESSAGE ? (
+      <Pressable accessibilityRole="button" accessibilityLabel="Create a new account" onPress={() => router.replace('/(auth)/create-account')} style={styles.guest}>
+        <Ionicons name="person-add-outline" size={15} color={colors.accent} /><AppText variant="bodySmall" style={styles.link}>Create new account</AppText>
       </Pressable>
+    ) : null}
+    <Animated.View entering={FadeInDown.delay(560).duration(550)} style={styles.actions}>
+      <AppButton label={isSignUp ? 'Create account' : 'Sign in'} onPress={() => void submit()} loading={loading} disabled={loading || googleLoading} variant="secondary" icon={<Ionicons name={isSignUp ? 'person-add-outline' : 'log-in-outline'} size={18} color={colors.textPrimary} />} />
       <Pressable accessibilityRole="button" onPress={() => router.replace(isSignUp ? '/(auth)/login' : '/(auth)/create-account')} style={styles.switch}><AppText variant="bodySmall" muted>{isSignUp ? 'Already have an account? ' : 'New to Watch Later? '}<AppText variant="bodySmall" style={styles.link}>{isSignUp ? 'Sign in' : 'Create account'}</AppText></AppText></Pressable>
-      <View style={styles.divider}><View style={styles.dividerLine} /><AppText variant="caption" muted>or</AppText><View style={styles.dividerLine} /></View>
       <Pressable accessibilityRole="button" onPress={() => void continueAsGuest()} style={styles.guest}><Ionicons name="arrow-forward" size={15} color={colors.accent} /><AppText variant="bodySmall" style={styles.link}>Continue as Guest</AppText></Pressable>
     </Animated.View>
   </KeyboardAvoidingView></Screen>;
@@ -126,7 +211,7 @@ const styles = StyleSheet.create({
   headerBadge: { flexDirection: 'row', alignItems: 'center', gap: spacing.xs, backgroundColor: 'rgba(15,15,23,0.6)', borderColor: 'rgba(255,255,255,0.12)', borderWidth: 1, borderRadius: radius.pill, paddingHorizontal: spacing.md, paddingVertical: spacing.xs },
   headerBadgeText: { color: '#E9E2F5', fontSize: 10, letterSpacing: 1.6 },
   hero: { paddingTop: spacing.xl, paddingBottom: spacing.lg, gap: spacing.sm },
-  orb: { position: 'absolute', top: -40, left: -60, width: 240, height: 240, borderRadius: 120, backgroundColor: 'rgba(168,85,247,0.15)' },
+  orb: { position: 'absolute', top: -40, left: -60, width: 240, height: 240, borderRadius: 120, backgroundColor: 'rgba(124,58,237,0.09)' },
   eyebrow: { color: colors.accent, letterSpacing: 2.4 },
   title: { color: colors.white, fontSize: 38, lineHeight: 44, letterSpacing: -1 },
   accentBar: { width: 56, height: 4, borderRadius: 2, backgroundColor: colors.accent, marginTop: spacing.xs },
@@ -136,11 +221,13 @@ const styles = StyleSheet.create({
   inputFocused: { borderColor: colors.accent, backgroundColor: colors.surfaceElevated },
   error: { color: colors.error, marginTop: spacing.md },
   actions: { gap: spacing.xs, marginTop: spacing.lg, paddingBottom: spacing['2xl'] },
-  google: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm, minHeight: 56, borderRadius: radius.pill, backgroundColor: '#FFFFFF', paddingHorizontal: spacing.xl },
+  googleBlock: { gap: spacing.sm, marginTop: spacing.sm },
+  google: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.sm, minHeight: 60, borderRadius: radius.pill, backgroundColor: '#FFFFFF', paddingHorizontal: spacing.xl },
   googlePressed: { opacity: 0.85, transform: [{ scale: 0.98 }] },
   googleLabel: { color: '#1A1A1A' },
+  recommended: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs },
   switch: { alignItems: 'center', paddingVertical: spacing.sm },
-  divider: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.xs },
+  divider: { flexDirection: 'row', alignItems: 'center', gap: spacing.md, paddingVertical: spacing.md },
   dividerLine: { flex: 1, height: StyleSheet.hairlineWidth, backgroundColor: colors.border },
   guest: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.xs, padding: spacing.md },
   link: { color: colors.accent },

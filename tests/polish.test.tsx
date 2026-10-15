@@ -9,7 +9,8 @@ import { CatalogError } from '@/domain/errors/CatalogError';
 import { mapTmdbMovie } from '@/data/remote/tmdb/mappers';
 import { catalogRepository } from '@/data/remote/catalog/RemoteCatalogRepository';
 import { runMigrations } from '@/data/local/database/migrations';
-import { SqliteWatchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
+import { SqliteWatchStateRepository, watchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
+import type { CatalogMedia } from '@/domain/models/media';
 import { createSqliteTestAdapter } from './sqliteTestAdapter';
 import { friendlyErrorMessage } from '@/lib/friendlyError';
 import { isTabletWidth, contentMaxWidth } from '@/theme/responsive';
@@ -18,6 +19,8 @@ import { AppErrorBoundary } from '@/components/feedback/AppErrorBoundary';
 import { OfflineBanner } from '@/components/feedback/OfflineBanner';
 import { FadeInView } from '@/components/common/FadeInView';
 import { EpisodeList } from '@/components/media/EpisodeList';
+import { SeasonsSection } from '@/components/media/SeasonsSection';
+import { hasAired } from '@/features/catalog/upcoming';
 import { TrackedMediaRow } from '@/components/media/TrackedMediaRow';
 import { PosterCard } from '@/components/media/PosterCard';
 import { useCatalogSearch } from '@/features/catalog/hooks';
@@ -137,8 +140,10 @@ describe('Phase 6 polish', () => {
       const repository = new SqliteWatchStateRepository(async () => adapter.database);
       const title = media();
       await repository.addToWatchlist(title);
-      await repository.markMovieWatched(title, true);
       expect(await repository.isInWatchlist(title)).toBe(true);
+      // Watched and watchlist are mutually exclusive — marking watched moves it.
+      await repository.markMovieWatched(title, true);
+      expect(await repository.isInWatchlist(title)).toBe(false);
       expect(await repository.isMovieWatched(title)).toBe(true);
       const pending = await repository.getPendingChanges();
       expect(pending.length).toBeGreaterThanOrEqual(2);
@@ -182,6 +187,82 @@ describe('Phase 6 polish', () => {
 
     const card = await renderAsync(<PosterCard title="Film 7" posterUri="https://image.example/p.jpg" />);
     expect(collectText(card.toJSON()).join(' ')).toMatch(/Film 7/);
+  });
+
+  it('8b. locks episodes whose air date is still ahead', async () => {
+    const day = 86_400_000;
+    const dayOf = (offset: number) => new Date(Date.now() + offset * day).toISOString().slice(0, 10);
+    const aired = { provider: 'tmdb', mediaType: 'series', providerId: 'e1', seriesId: 's1', seasonNumber: 1, episodeNumber: 1, title: 'Pilot', airDate: dayOf(-1) } as const;
+    const upcoming = { provider: 'tmdb', mediaType: 'series', providerId: 'e2', seriesId: 's1', seasonNumber: 1, episodeNumber: 2, title: 'Next Week', airDate: dayOf(7) } as const;
+
+    expect(hasAired(dayOf(-1))).toBe(true);
+    expect(hasAired(dayOf(7))).toBe(false);
+    expect(hasAired(undefined)).toBe(true);
+
+    const toggled: string[] = [];
+    const list = await renderAsync(<EpisodeList episodes={[aired, upcoming]} watchedIds={[]} onToggleEpisode={(episode) => toggled.push(episode.providerId)} onUpToHere={() => toggled.push('longpress')} />);
+    const rows = list.root.findAll((node) => typeof node.props?.onPress === 'function');
+    expect(rows).toHaveLength(2);
+    // The aired row stays interactive, including its long-press shortcut.
+    expect((rows[0].props as { accessibilityState: { disabled: boolean } }).accessibilityState.disabled).toBe(false);
+    expect(typeof (rows[0].props as { onLongPress?: unknown }).onLongPress).toBe('function');
+    act(() => { (rows[0].props as { onPress: () => void }).onPress(); });
+    // The unreleased row is inert: no tap, no long-press.
+    expect((rows[1].props as { accessibilityState: { disabled: boolean } }).accessibilityState.disabled).toBe(true);
+    expect((rows[1].props as { onLongPress?: unknown }).onLongPress).toBeUndefined();
+    expect(toggled).toEqual(['e1']);
+    expect(collectText(list.toJSON()).join(' ')).toMatch(/Out /);
+  });
+
+  it('8c. collapsed season card keeps the filled checkbox of a finished season', async () => {
+    const watchedIds = Array.from({ length: 10 }, (_, index) => `bo-s1e${index + 1}`);
+    const episodes = watchedIds.map((providerId, index) => ({
+      provider: 'tmdb', mediaType: 'series', providerId, seriesId: '1399',
+      seasonNumber: 1, episodeNumber: index + 1, title: `Episode ${index + 1}`, airDate: '2001-09-09',
+    }));
+    const series: CatalogMedia = {
+      provider: 'tmdb', mediaType: 'series', providerId: '1399', id: 'tmdb:series:1399',
+      title: 'Band of Brothers', genres: [], episodeMetadata: 'available',
+      seasonSummaries: [{ seasonNumber: 1, name: 'Season 1', episodeCount: 10 }],
+    };
+    const identity = { provider: 'tmdb', mediaType: 'series', providerId: '1399' } as const;
+    // Keep the section hermetic: no real SQLite and no real catalog fetch.
+    const spies = [
+      jest.spyOn(watchStateRepository, 'getWatchedEpisodeIds').mockResolvedValue(watchedIds),
+      jest.spyOn(watchStateRepository, 'isSeriesTracked').mockResolvedValue(false),
+      jest.spyOn(watchStateRepository, 'getCachedSeason').mockResolvedValue(undefined),
+    ];
+    const getSeason = catalogRepository.getSeason as jest.Mock;
+    getSeason.mockResolvedValue({ series: identity, seasonNumber: 1, name: 'Season 1', episodes });
+
+    const flush = async () => { await act(async () => { await new Promise((resolve) => setTimeout(resolve, 10)); }); };
+    const checkedToggle = (renderer: ReactTestRenderer, label: string) =>
+      renderer.root.findAll((node) => typeof node.props?.onPress === 'function' && node.props?.accessibilityLabel === label);
+
+    try {
+      const section = await renderAsync(<QueryClientProvider client={queryClient}><SeasonsSection media={series} /></QueryClientProvider>);
+      // Expanded: every aired episode is watched, so the header reads 10/10 and the box is filled.
+      let toggle = checkedToggle(section, 'Mark Season 1 unwatched');
+      for (let attempt = 0; attempt < 20 && !toggle.length; attempt += 1) { await flush(); toggle = checkedToggle(section, 'Mark Season 1 unwatched'); }
+      expect(toggle).toHaveLength(1);
+      expect(toggle[0].props.accessibilityState.checked).toBe(true);
+      expect(section.root.findAll((node) => node.props?.name === 'checkmark-circle').length).toBeGreaterThanOrEqual(1);
+
+      // Collapse: no episode rows are loaded anymore — the box must stay filled.
+      const header = section.root.findAll((node) => typeof node.props?.onPress === 'function' && typeof node.props?.accessibilityLabel === 'string' && node.props.accessibilityLabel.endsWith(', collapse'))[0];
+      expect(header).toBeDefined();
+      act(() => { (header.props as { onPress: () => void }).onPress(); });
+      await flush();
+
+      toggle = checkedToggle(section, 'Mark Season 1 unwatched');
+      expect(toggle).toHaveLength(1);
+      expect(toggle[0].props.accessibilityState.checked).toBe(true);
+      expect(section.root.findAll((node) => node.props?.name === 'checkmark-circle').length).toBeGreaterThanOrEqual(1);
+      expect(collectText(section.toJSON()).join(' ')).toMatch(/Season 1, 10 of 10 watched/);
+    } finally {
+      spies.forEach((spy) => spy.mockRestore());
+      getSeason.mockReset();
+    }
   });
 
   it('10. foreground connectivity listener cleans up on unmount', async () => {

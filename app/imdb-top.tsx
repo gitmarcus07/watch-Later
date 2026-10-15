@@ -30,7 +30,7 @@ export default function ImdbTopScreen() {
   const openMedia = (item: ImdbTopItem) => router.push({ pathname: '/media/[id]', params: { id: `tmdb:${item.mediaType}:${item.tmdbId}` } });
 
   return <Screen>
-    <FadeInView><View style={styles.header}><IconButton name="arrow-back" label="Go back" onPress={() => router.back()} /><View style={styles.title}><AppText variant="heading1">IMDb Top 250</AppText><AppText variant="bodySmall" muted>{items.length ? `${items.length} highest-rated titles · weekly snapshot` : 'Weekly snapshot of IMDb ratings'}</AppText></View></View></FadeInView>
+    <FadeInView><View style={styles.header}><IconButton name="arrow-back" label="Go back" onPress={() => router.back()} /><View style={styles.title}><AppText variant="heading1">Top 250</AppText></View></View></FadeInView>
     <View style={styles.pills}>
       {(['movie', 'series'] as ImdbMedia[]).map((option) => {
         const selected = option === media;
@@ -38,7 +38,7 @@ export default function ImdbTopScreen() {
       })}
     </View>
     {query.isLoading ? <FlatList data={[0, 1, 2, 3, 4, 5]} keyExtractor={(item) => String(item)} numColumns={2} columnWrapperStyle={styles.gridRow} contentContainerStyle={styles.grid} style={styles.flat} renderItem={() => <PosterSkeleton />} showsVerticalScrollIndicator={false} />
-      : query.isError ? <ErrorView message="Could not load the IMDb Top 250. Check your connection and try again." onRetry={() => void query.refetch()} />
+      : query.isError ? <ErrorView message="Could not load Top 250. Check your connection and try again." onRetry={() => void query.refetch()} />
       : items.length ? <FlatList
         data={items}
         keyExtractor={(item) => `${item.mediaType}:${item.tmdbId}`}
@@ -54,7 +54,6 @@ export default function ImdbTopScreen() {
         renderItem={({ item }) => <PosterCard title={item.title} subtitle={item.year ? String(item.year) : undefined} meta={subtitleFor(item)} posterUri={item.posterUrl} badge={`#${item.rank}`} width={cardWidth} onPress={() => openMedia(item)} />}
       />
       : <EmptyState icon="star-outline" title="Top 250 not published yet" message="The weekly IMDb snapshot has not been generated yet. Check back soon." />}
-    <View style={styles.footnote}><AppText variant="caption" muted style={styles.footnoteText}>Rankings computed from official IMDb rating dumps — not live viewership figures.</AppText></View>
   </Screen>;
 }
 
@@ -69,6 +68,4 @@ const styles = StyleSheet.create({
   flat: { flex: 1 },
   grid: { paddingBottom: spacing['2xl'], gap: spacing.md },
   gridRow: { gap: spacing.md },
-  footnote: { paddingVertical: spacing.md },
-  footnoteText: { textAlign: 'center', lineHeight: 18 },
 });

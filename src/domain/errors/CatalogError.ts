@@ -11,7 +11,7 @@ const messages: Record<CatalogErrorCode, string> = {
   rate_limited: 'The catalog is busy. Please try again shortly.',
   server: 'The catalog is temporarily unavailable.',
   timeout: 'The request took too long. Check your connection and try again.',
-  network: 'Could not connect to the catalog. Check your internet connection.',
+  network: 'You’re offline. Your saved library still works — reconnect to browse the catalog.',
   invalid_response: 'The catalog returned data that could not be read.',
   graphql: 'AniList could not complete this request. Please try again.',
   metadata_unavailable: 'Episode details are not available from this catalog provider.',

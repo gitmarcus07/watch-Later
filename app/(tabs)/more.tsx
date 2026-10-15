@@ -17,8 +17,8 @@ import { AppButton } from '@/components/buttons/AppButton';
 
 const groups: { title: string; rows: { label: string; detail: string; icon: keyof typeof Ionicons.glyphMap; route: string; hint: string }[] }[] = [
   { title: 'PREFERENCES', rows: [{ label: 'Notifications', detail: 'Reminders', icon: 'notifications-outline', route: '/settings/notifications', hint: 'Open Notification settings' }] },
-  { title: 'LIBRARY', rows: [{ label: 'Favorites', detail: 'Your favorite titles', icon: 'heart-outline', route: '/favorites', hint: 'Open Favorites' }, { label: 'Upcoming', detail: 'Future movies, series and anime', icon: 'calendar-outline', route: '/upcoming', hint: 'Open Upcoming releases' }] },
-  { title: 'DISCOVER', rows: [{ label: 'Global Hits', detail: 'Monthly & yearly rankings', icon: 'globe-outline', route: '/global-hits', hint: 'Open Global Hits rankings' }, { label: 'IMDb Top 250', detail: 'Top-rated movies & series', icon: 'star-outline', route: '/imdb-top', hint: 'Open IMDb Top 250' }, { label: 'Upcoming on OTT', detail: 'Coming soon', icon: 'cloud-outline', route: '/ott-upcoming', hint: 'Open Upcoming on OTT' }, { label: 'New Releases', detail: 'Fresh movies and shows', icon: 'sparkles-outline', route: '/new-releases', hint: 'Open New Releases' }, { label: 'Top 100', detail: 'The highest-rated titles', icon: 'trophy-outline', route: '/top-100', hint: 'Open Top 100' }] },
+  { title: 'LIBRARY', rows: [{ label: 'Favorites', detail: 'Your favorite titles', icon: 'heart-outline', route: '/favorites', hint: 'Open Favorites' }] },
+  { title: 'DISCOVER', rows: [{ label: 'Franchise Collections', detail: 'Movies & shows in order', icon: 'albums-outline', route: '/franchises', hint: 'Open franchise collections' }, { label: 'Global Hits', detail: 'Coming soon', icon: 'globe-outline', route: '/global-hits', hint: 'Open Global Hits rankings' }, { label: 'Top 250', detail: 'Top-rated movies & series', icon: 'star-outline', route: '/imdb-top', hint: 'Open Top 250' }, { label: 'Upcoming on OTT', detail: 'Coming soon', icon: 'cloud-outline', route: '/ott-upcoming', hint: 'Open Upcoming on OTT' }, { label: 'New Releases', detail: 'Fresh movies and shows', icon: 'sparkles-outline', route: '/new-releases', hint: 'Open New Releases' }, { label: 'Top 100', detail: 'The highest-rated titles', icon: 'trophy-outline', route: '/top-100', hint: 'Open Top 100' }] },
   { title: 'ABOUT', rows: [{ label: 'About Watch Later', detail: 'A little about this app', icon: 'information-circle-outline', route: '/about', hint: 'Open About Watch Later' }, { label: 'Privacy & terms', detail: 'Your data, your choice', icon: 'shield-checkmark-outline', route: '/privacy', hint: 'Open Privacy and Terms' }] },
 ];
 
@@ -57,21 +57,11 @@ export default function MoreScreen() {
     setDeleteOpen(false);
     setBusy(true);
     try {
-      const { authDeleted } = await deleteAccount(session.userId);
+      await deleteAccount(session.userId);
       const guest = { mode: 'guest' as const, userId: `guest-${Date.now()}` };
       setSession(guest);
       await persistSession(guest, onboardingComplete);
-      if (authDeleted) {
-        showToast('Your account and all its data were deleted', 'success');
-      } else {
-        // Data is gone and you're signed out — but the sign-in itself
-        // survived because the server step isn't deployed yet.
-        void showDialog({
-          type: 'warning',
-          title: 'Data deleted, sign-in remains',
-          message: 'Your library and data were deleted and you were signed out. The email sign-in itself still exists — deploy the delete-account function (see DEVELOPMENT.md) or remove the user in the Supabase dashboard so it can’t sign in again.',
-        });
-      }
+      showToast('Your account and all its data were deleted', 'success');
     } catch (cause) {
       void showDialog({ type: 'error', title: 'Couldn’t delete your account', message: cause instanceof Error ? cause.message : 'Your data is unchanged. Please try again.' });
     } finally { setBusy(false); }

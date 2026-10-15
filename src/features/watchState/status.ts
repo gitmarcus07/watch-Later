@@ -3,6 +3,7 @@ import type { CatalogMedia, CatalogSeason, MediaIdentity } from '@/domain/models
 import type { WatchStateRepository } from '@/domain/models/watchState';
 import { catalogRepository } from '@/data/remote/catalog/RemoteCatalogRepository';
 import { watchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
+import { hasAired } from '@/features/catalog/upcoming';
 
 export type TitleStatus = 'none' | 'plan' | 'watching' | 'finished';
 
@@ -104,8 +105,12 @@ export async function finishTitle(media: CatalogMedia, context: ProgressContext 
 /**
  * "I'm up to here": marks every cached episode at or before the position as
  * watched, fetching and caching the season first when it is missing.
+ *
+ * Weekly shows publish one episode at a time, so the position is clamped to
+ * the last episode that has actually aired — asking for a future episode marks
+ * what exists and returns that position.
  */
-export async function markUpToHere(media: CatalogMedia, seasonNumber: number, episodeNumber: number, context: ProgressContext = defaultContext()): Promise<void> {
+export async function markUpToHere(media: CatalogMedia, seasonNumber: number, episodeNumber: number, context: ProgressContext = defaultContext()): Promise<number> {
   const repo = context.repo ?? watchStateRepository;
   const isTmdbSeries = media.provider === 'tmdb' && media.mediaType === 'series';
   const isAnime = media.provider === 'anilist' && media.mediaType === 'anime';
@@ -122,5 +127,9 @@ export async function markUpToHere(media: CatalogMedia, seasonNumber: number, ep
     await repo.storeSeason(full, fetched.seasonNumber, fetched.name, fetched.episodes.length, fetched.overview, fetched.airDate, fetched.posterUrl, fetched.episodes);
     season = (await repo.getCachedSeason(identity, seasonNumber)) ?? fetched;
   }
-  await repo.markEpisodesUpTo(media, season, episodeNumber);
+  const lastAired = season.episodes.reduce((latest, episode) => (hasAired(episode.airDate) ? Math.max(latest, episode.episodeNumber) : latest), 0);
+  const target = Math.min(episodeNumber, lastAired || episodeNumber);
+  if (target < 1) throw new AppError('catalog', 'No episodes of this season have aired yet.');
+  await repo.markEpisodesUpTo(media, season, target);
+  return target;
 }
