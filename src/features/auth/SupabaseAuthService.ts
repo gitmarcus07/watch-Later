@@ -3,6 +3,7 @@ import { AppError } from '@/domain/errors/AppError';
 import type { SessionState } from '@/domain/models/session';
 import { supabase } from '@/data/remote/supabase/client';
 import { clearDeviceLibrary } from '@/data/local/database/database';
+import { watchStateSyncRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
 import { clearLastDeletedAccount, getLastDeletedAccount } from './deleteAccount';
 import { SqliteGuestMigrationService } from '@/data/local/repositories/SqliteGuestMigrationService';
 import type { GuestMigrationService } from '@/data/local/repositories/GuestMigrationService';
@@ -269,6 +270,9 @@ export class SupabaseAuthService implements AuthService {
     private readonly migration: GuestMigrationService = guestMigrationService,
     private readonly oauth: OAuthDeps | null = null,
     private readonly repairLocalLibrary: () => Promise<void> = () => clearDeviceLibrary(),
+    private readonly hasPendingLocalChanges: () => Promise<boolean> = async () => {
+      try { return (await watchStateSyncRepository.getPendingChanges()).length > 0; } catch { return true; }
+    },
   ) {}
 
   private requireClient(): AuthClient {
@@ -278,11 +282,12 @@ export class SupabaseAuthService implements AuthService {
 
   /**
    * Binds the device library to the account. A stale binding is repaired
-   * silently (no dialog) when it can only be deletion leftovers: the account
-   * was just created, or a previous account deletion on this device hasn't
-   * been followed by a successful sign-in yet. Anything else rethrows as a
-   * DeviceLinkedError WITHOUT signing out, so the UI can clear-and-continue
-   * the same session instead of sending the user through OAuth again.
+   * silently (no dialog) when it is safe to do so: the account was just
+   * created, a previous account deletion on this device is still outstanding,
+   * or the account that owned this device has no unsynced changes left (so
+   * clearing the local mirror loses nothing). Only when unsynced local data
+   * would be destroyed does it rethrow as a DeviceLinkedError WITHOUT signing
+   * out, so the UI can warn and clear-and-continue the same session.
    */
   private async connectAccountAllowingFreshRebind(accountId: string, isFresh: boolean, accountEmail?: string): Promise<void> {
     try {
@@ -301,6 +306,22 @@ export class SupabaseAuthService implements AuthService {
       // while a deletion flag from this device is still outstanding.
       const deletedFlag = await getLastDeletedAccount().catch(() => null);
       if (isFresh || deletedFlag) {
+        try {
+          await this.repairLocalLibrary();
+          await this.migration.migrateToAccount(accountId);
+          return;
+        } catch {
+          // Fall through to the dialog path with the session still alive.
+        }
+      }
+      // Switching to a different account. If the account that previously owned
+      // this device has nothing unsynced (its data already lives in its own
+      // cloud), clearing the local mirror loses nothing — so rebind silently
+      // instead of blocking sign-in behind a scary dialog. Only warn when there
+      // are genuinely unsynced local changes that clearing would destroy.
+      let hasPending = true;
+      try { hasPending = await this.hasPendingLocalChanges(); } catch { hasPending = true; }
+      if (!hasPending) {
         try {
           await this.repairLocalLibrary();
           await this.migration.migrateToAccount(accountId);

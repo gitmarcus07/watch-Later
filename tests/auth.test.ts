@@ -1,4 +1,4 @@
-import { SupabaseAuthService, isExistingAccountUser, parseOAuthRedirect, resolveOAuthRedirectUri } from '@/features/auth/SupabaseAuthService';
+import { SupabaseAuthService, DeviceLinkedError, isExistingAccountUser, parseOAuthRedirect, resolveOAuthRedirectUri } from '@/features/auth/SupabaseAuthService';
 import type { GuestMigrationService } from '@/data/local/repositories/GuestMigrationService';
 
 const user = { id: 'user-123', email: 'viewer@example.test' };
@@ -225,10 +225,10 @@ describe('create account with an email that already exists', () => {
   });
 
   it('recognises existing accounts by age and by identity resolution', () => {
-    expect(isExistingAccountUser({ id: 'u', created_at: dayAgo })).toBe(true);
-    expect(isExistingAccountUser({ id: 'u', identities: [] })).toBe(true);
-    expect(isExistingAccountUser({ id: 'u', created_at: new Date().toISOString() })).toBe(false);
-    expect(isExistingAccountUser({ id: 'u' })).toBe(false);
+    expect(isExistingAccountUser({ created_at: dayAgo })).toBe(true);
+    expect(isExistingAccountUser({ identities: [] })).toBe(true);
+    expect(isExistingAccountUser({ created_at: new Date().toISOString() })).toBe(false);
+    expect(isExistingAccountUser({})).toBe(false);
     expect(isExistingAccountUser(null)).toBe(false);
   });
 });
@@ -257,5 +257,51 @@ describe('Google sign-in with no live account', () => {
     const service = new SupabaseAuthService(client, migration(), deps);
     await expect(service.signInWithGoogle('sign-in')).rejects.toThrow('couldn’t find an account');
     expect(client.auth.signOut).toHaveBeenCalled();
+  });
+});
+
+describe('signing into a different account on the same device', () => {
+  const linked = new DeviceLinkedError('account-b', 'b@example.test');
+
+  /** Migration that refuses the bind the first time (device owned by another account) then succeeds after a repair. */
+  function linkedThenBinds() {
+    let refused = false;
+    return {
+      prepareMigration: jest.fn().mockResolvedValue(undefined),
+      migrateToAccount: jest.fn().mockImplementation(async () => {
+        if (!refused) { refused = true; throw linked; }
+      }),
+      resolveConflicts: jest.fn().mockResolvedValue(undefined),
+      markMigrationComplete: jest.fn().mockResolvedValue(undefined),
+    };
+  }
+
+  function alwaysLinked() {
+    return { prepareMigration: jest.fn(), migrateToAccount: jest.fn().mockRejectedValue(linked), resolveConflicts: jest.fn(), markMigrationComplete: jest.fn() };
+  }
+
+  it('switches seamlessly when the previous account has nothing unsynced', async () => {
+    const migrationService = linkedThenBinds();
+    const repair = jest.fn().mockResolvedValue(undefined);
+    const service = new SupabaseAuthService(authClient(), migrationService, null, repair, async () => false);
+    await expect(service.signIn('b@example.test', 'test-password')).resolves.toMatchObject({ mode: 'authenticated', userId: user.id });
+    expect(repair).toHaveBeenCalled();
+    expect(migrationService.migrateToAccount).toHaveBeenCalledTimes(2);
+  });
+
+  it('still warns before clearing when the previous account has unsynced changes', async () => {
+    const migrationService = alwaysLinked();
+    const repair = jest.fn().mockResolvedValue(undefined);
+    const service = new SupabaseAuthService(authClient(), migrationService, null, repair, async () => true);
+    await expect(service.signIn('b@example.test', 'test-password')).rejects.toThrow('linked to another account');
+    expect(repair).not.toHaveBeenCalled();
+  });
+
+  it('falls back to warning when the pending-changes check itself fails', async () => {
+    const migrationService = alwaysLinked();
+    const repair = jest.fn().mockResolvedValue(undefined);
+    const service = new SupabaseAuthService(authClient(), migrationService, null, repair, async () => { throw new Error('db unreadable'); });
+    await expect(service.signIn('b@example.test', 'test-password')).rejects.toThrow('linked to another account');
+    expect(repair).not.toHaveBeenCalled();
   });
 });

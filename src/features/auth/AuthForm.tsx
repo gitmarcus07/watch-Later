@@ -20,6 +20,10 @@ import { colors, radius, spacing } from '@/theme';
 const authService = new SupabaseAuthService();
 type Mode = 'sign-in' | 'sign-up';
 
+/** Shown only when switching accounts would destroy genuinely unsynced local changes. */
+const ACCOUNT_SWITCH_TITLE = 'Switch to a different account?';
+const ACCOUNT_SWITCH_MESSAGE = 'This device still has changes that haven’t been uploaded from the account you were using. To sign in here, we’ll clear this device’s saved list and load this account’s library instead. Anything already synced stays safe in the other account.';
+
 function GlowOrb() {
   const glow = useSharedValue(0.5);
   useEffect(() => {
@@ -61,9 +65,9 @@ export function AuthForm({ mode }: { mode: Mode }) {
   async function offerLinkedResetAndContinue(pending: DeviceLinkedError): Promise<boolean> {
     const confirmed = await showDialog({
       type: 'warning',
-      title: 'Device library linked elsewhere',
-      message: 'This device library belongs to a different account. Clear it and continue? Anything already synced stays safe in the other account.',
-      primaryAction: { label: 'Clear & continue', destructive: true },
+      title: ACCOUNT_SWITCH_TITLE,
+      message: ACCOUNT_SWITCH_MESSAGE,
+      primaryAction: { label: 'Clear & switch', destructive: true },
       secondaryAction: { label: 'Cancel' },
     });
     if (!confirmed) {
@@ -79,9 +83,9 @@ export function AuthForm({ mode }: { mode: Mode }) {
   async function offerLinkedResetAndRetry(retry: () => Promise<void>): Promise<boolean> {
     const confirmed = await showDialog({
       type: 'warning',
-      title: 'Device library linked elsewhere',
-      message: 'This device library belongs to a different account. Clear it and continue? Anything already synced stays safe in the other account.',
-      primaryAction: { label: 'Clear & continue', destructive: true },
+      title: ACCOUNT_SWITCH_TITLE,
+      message: ACCOUNT_SWITCH_MESSAGE,
+      primaryAction: { label: 'Clear & switch', destructive: true },
       secondaryAction: { label: 'Cancel' },
     });
     if (!confirmed) return false;
