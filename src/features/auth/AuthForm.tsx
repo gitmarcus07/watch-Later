@@ -8,7 +8,7 @@ import { AppButton } from '@/components/buttons/AppButton';
 import { IconButton } from '@/components/buttons/IconButton';
 import { Screen } from '@/components/common/Screen';
 import { AuthGradientBackground } from '@/components/auth/AuthGradientBackground';
-import { showDialog, showToast } from '@/components/feedback/AppDialog';
+import { showDialog } from '@/components/feedback/AppDialog';
 import { DeviceLinkedError, NO_GOOGLE_ACCOUNT_MESSAGE, NO_GOOGLE_ACCOUNT_TITLE, SupabaseAuthService, isDeviceLinkedError } from './SupabaseAuthService';
 import type { SessionState } from '@/domain/models/session';
 import { scheduleAutoSync } from '@/features/sync/autoSync';
@@ -52,8 +52,12 @@ export function AuthForm({ mode }: { mode: Mode }) {
     // "needs attention"/"offline" status must not bleed into this one.
     useSyncStore.getState().reset();
     if (session.mode === 'authenticated') scheduleAutoSync('auth');
-    if (session.mode === 'authenticated' && session.notice) showToast(session.notice, 'info');
     router.replace('/(tabs)');
+    // An existing email that resolved to a sign-in (instead of a new account)
+    // gets an unmissable confirmation so it never reads as "creating account".
+    if (session.mode === 'authenticated' && session.notice) {
+      void showDialog({ type: 'info', title: 'You already have an account', message: session.notice, primaryAction: { label: 'Continue' } });
+    }
   }
 
   /**

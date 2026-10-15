@@ -1,4 +1,4 @@
-import { SupabaseAuthService, DeviceLinkedError, isExistingAccountUser, parseOAuthRedirect, resolveOAuthRedirectUri } from '@/features/auth/SupabaseAuthService';
+import { SupabaseAuthService, DeviceLinkedError, EXISTING_ACCOUNT_NOTICE, isExistingAccountUser, parseOAuthRedirect, resolveOAuthRedirectUri } from '@/features/auth/SupabaseAuthService';
 import type { GuestMigrationService } from '@/data/local/repositories/GuestMigrationService';
 
 const user = { id: 'user-123', email: 'viewer@example.test' };
@@ -44,14 +44,28 @@ describe('optional Supabase authentication', () => {
 
   it('creates an account and merges the local library after authentication', async () => {
     const client = authClient();
+    // A genuinely new email: the sign-in probe fails, so signup proceeds.
+    client.auth.signInWithPassword.mockResolvedValue({ data: { user: null, session: null }, error: { code: 'invalid_credentials', message: 'no such user' } });
+    const migrationService = migration();
+    await expect(new SupabaseAuthService(client, migrationService).createAccount('brand-new@example.test', 'test-password'))
+      .resolves.toEqual({ mode: 'authenticated', userId: user.id, email: user.email });
+    expect(client.auth.signUp).toHaveBeenCalled();
+    expect(migrationService.migrateToAccount).toHaveBeenCalledWith(user.id);
+  });
+
+  it('treats "create account" with an existing email + password as a sign-in, not a signup', async () => {
+    const client = authClient(); // sign-in probe succeeds => account already exists
     const migrationService = migration();
     await expect(new SupabaseAuthService(client, migrationService).createAccount('viewer@example.test', 'test-password'))
-      .resolves.toMatchObject({ mode: 'authenticated', userId: user.id });
+      .resolves.toMatchObject({ mode: 'authenticated', userId: user.id, notice: EXISTING_ACCOUNT_NOTICE });
+    expect(client.auth.signInWithPassword).toHaveBeenCalled();
+    expect(client.auth.signUp).not.toHaveBeenCalled();
     expect(migrationService.migrateToAccount).toHaveBeenCalledWith(user.id);
   });
 
   it('keeps a guest session when email confirmation is required', async () => {
     const client = authClient();
+    client.auth.signInWithPassword.mockResolvedValue({ data: { user: null, session: null }, error: { code: 'invalid_credentials', message: 'no such user' } });
     client.auth.signUp.mockResolvedValue({ data: { user, session: null }, error: null });
     const migrationService = migration();
     await expect(new SupabaseAuthService(client, migrationService).createAccount('viewer@example.test', 'test-password')).rejects.toThrow('Check your email');
@@ -198,28 +212,34 @@ describe('Google sign-in flow', () => {
 
 describe('create account with an email that already exists', () => {
   const dayAgo = new Date(Date.now() - 86_400_000).toISOString();
-
-  it('signs the user in and says so instead of pretending a new account was made', async () => {
+  /** Fails the sign-in probe so the test exercises the signUp fallback path. */
+  function probeFails() {
     const client = authClient();
+    client.auth.signInWithPassword.mockResolvedValue({ data: { user: null, session: null }, error: { code: 'invalid_credentials', message: 'no such user' } });
+    return client;
+  }
+
+  it('still treats a signUp that auto-signs-in an old account as a sign-in', async () => {
+    const client = probeFails();
     client.auth.signUp.mockResolvedValue({ data: { user: { ...user, created_at: dayAgo }, session }, error: null });
     await expect(new SupabaseAuthService(client, migration()).createAccount('viewer@example.test', 'test-password'))
-      .resolves.toMatchObject({ mode: 'authenticated', userId: user.id, notice: expect.stringContaining('signed in') });
+      .resolves.toMatchObject({ mode: 'authenticated', userId: user.id, notice: EXISTING_ACCOUNT_NOTICE });
   });
 
-  it('flags an email that resolved to an existing identity', async () => {
-    const client = authClient();
+  it('flags a signUp that resolved to an existing identity', async () => {
+    const client = probeFails();
     client.auth.signUp.mockResolvedValue({ data: { user: { ...user, identities: [] }, session }, error: null });
     await expect(new SupabaseAuthService(client, migration()).createAccount('viewer@example.test', 'test-password'))
-      .resolves.toMatchObject({ notice: expect.any(String) });
+      .resolves.toMatchObject({ notice: EXISTING_ACCOUNT_NOTICE });
   });
 
   it('keeps a genuinely fresh signup free of notices', async () => {
-    await expect(new SupabaseAuthService(authClient(), migration()).createAccount('viewer@example.test', 'test-password'))
+    await expect(new SupabaseAuthService(probeFails(), migration()).createAccount('brand-new@example.test', 'test-password'))
       .resolves.toEqual({ mode: 'authenticated', userId: user.id, email: user.email });
   });
 
   it('maps the newer already-registered error code to a sign-in nudge', async () => {
-    const client = authClient();
+    const client = probeFails();
     client.auth.signUp.mockResolvedValue({ data: { user: null, session: null }, error: { code: 'user_already_exists', message: 'raw diagnostic' } });
     await expect(new SupabaseAuthService(client, migration()).createAccount('viewer@example.test', 'test-password')).rejects.toThrow('Sign in instead');
   });

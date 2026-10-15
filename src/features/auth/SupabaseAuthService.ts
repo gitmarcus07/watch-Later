@@ -75,7 +75,7 @@ export const NO_GOOGLE_ACCOUNT_MESSAGE =
 
 /** Shown when "create account" resolves to an email that already has an account. */
 export const EXISTING_ACCOUNT_NOTICE =
-  'This email already had an account, so you’ve been signed in instead.';
+  'This email is already registered, so we signed you in instead of creating a new account. Your library is exactly as you left it.';
 
 /** Title for the "no account found" prompt on the auth screens. */
 export const NO_GOOGLE_ACCOUNT_TITLE = 'No account found';
@@ -371,13 +371,29 @@ export class SupabaseAuthService implements AuthService {
   }
 
   async createAccount(email: string, password: string): Promise<SessionState> {
-    const { data, error } = await this.requireClient().auth.signUp({ email, password });
+    const client = this.requireClient();
+    // If these exact credentials already sign in, the account exists — this is
+    // a sign-in, not a signup. Probe first so an existing email is never dressed
+    // up as "creating an account"; the UI then reports it as a sign-in.
+    const probe = await client.auth.signInWithPassword({ email, password });
+    if (!probe.error && probe.data?.user && probe.data?.session) {
+      await this.connectAccountAllowingFreshRebind(probe.data.user.id, false, probe.data.user.email ?? email);
+      await this.markAuthSuccess();
+      return {
+        mode: 'authenticated',
+        userId: probe.data.user.id,
+        email: probe.data.user.email ?? email,
+        notice: EXISTING_ACCOUNT_NOTICE,
+      };
+    }
+
+    const { data, error } = await client.auth.signUp({ email, password });
     if (error || !data.user) throw friendlyAuthError(error, 'sign-up');
     if (!data.session) throw new AppError('authentication', 'Check your email to confirm your account, then sign in. Your local library is unchanged.');
-    // Supabase can hand back a live session for an email that ALREADY has an
-    // account (same password). That is a sign-in, not a new account — it must
-    // never be presented as a fresh signup, and the local library must not be
-    // re-migrated onto it as if it were brand new.
+    // Some GoTrue configs still hand back a live session for an email that
+    // ALREADY has an account (different password, auto sign-in). Treat that as
+    // a sign-in too — never as a fresh signup — and don't re-migrate the local
+    // library onto it as if it were brand new.
     const existing = isExistingAccountUser(data.user);
     await this.connectAccountAllowingFreshRebind(data.user.id, !existing, data.user.email ?? email);
     await this.markAuthSuccess();
