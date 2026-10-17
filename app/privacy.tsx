@@ -6,11 +6,11 @@ import { Screen } from '@/components/common/Screen';
 import { IconButton } from '@/components/buttons/IconButton';
 import { colors, radius, spacing } from '@/theme';
 
-const principles = ['No ads', 'Never sold', 'Works offline'];
+const principles = ['No ads', 'Never sold', 'Works offline', 'No accounts'];
 
 const sections: { icon: keyof typeof Ionicons.glyphMap; title: string; body: string }[] = [
   { icon: 'phone-portrait-outline', title: 'Your watch data stays yours', body: 'Your watchlist, watched titles, episode progress, favorites, and lists are stored in a database on this device. They work fully offline and are never sold or shared for advertising.' },
-  { icon: 'cloud-outline', title: 'Optional account and cloud sync', body: 'Using Watch Later as a guest keeps everything on this device. If you create an account and sign in, your library syncs to your private cloud records so it follows you across devices. Signing out keeps your local data in place.' },
+  { icon: 'person-remove-outline', title: 'No accounts, no tracking', body: 'There is nothing to sign into. Watch Later has no user accounts and collects no personal data — your watchlist, watched titles, episode progress, favorites, and lists live only in the database on this device. Uninstalling removes everything, so export a backup from More if you ever reinstall.' },
   { icon: 'search-outline', title: 'Catalog metadata', body: 'Movie and TV details come from TMDb and TheTVDB, and anime details come from AniList. Searching the catalog contacts those providers; your personal library is never sent to them.' },
   { icon: 'ban-outline', title: 'No streaming content', body: 'Watch Later is a tracker, not a streaming service. It does not provide, host, or link to video streams.' },
   { icon: 'document-text-outline', title: 'Informational notice', body: 'This page is an informational summary, not a formal legal document. If you have questions about your data, contact support through your app store listing.' },
@@ -25,7 +25,7 @@ export default function PrivacyScreen() {
       <View style={styles.heroIcon}><Ionicons name="shield-checkmark" size={26} color={colors.accent} /></View>
       <AppText variant="heading2" style={styles.heroTitle}>Plain language, no small print</AppText>
       <AppText variant="bodySmall" muted style={styles.heroBody}>
-        Watch Later is a personal tracker. It collects only what you enter, stores it on your device first, and never monetises it.
+        Watch Later is a personal tracker. It collects only what you enter, stores it only on your device, and never monetises it.
       </AppText>
       <View style={styles.chips}>
         {principles.map((principle) => <View key={principle} style={styles.chip}><Ionicons name="checkmark-circle" size={12} color={colors.success} /><AppText variant="caption" style={styles.chipText}>{principle}</AppText></View>)}

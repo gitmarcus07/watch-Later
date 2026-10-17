@@ -3,8 +3,10 @@ import { AppError } from '@/domain/errors/AppError';
 import type { SessionState } from '@/domain/models/session';
 import { supabase } from '@/data/remote/supabase/client';
 import { clearDeviceLibrary } from '@/data/local/database/database';
+import { queryClient } from '@/lib/query/queryClient';
 import { watchStateSyncRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
 import { clearLastDeletedAccount, getLastDeletedAccount } from './deleteAccount';
+import { LOCAL_LIBRARY_PREP_NOTICE } from '@/lib/localLibraryNotice';
 import { SqliteGuestMigrationService } from '@/data/local/repositories/SqliteGuestMigrationService';
 import type { GuestMigrationService } from '@/data/local/repositories/GuestMigrationService';
 import type { AuthService } from './sessionService';
@@ -80,10 +82,63 @@ export const EXISTING_ACCOUNT_NOTICE =
 /** Title for the "no account found" prompt on the auth screens. */
 export const NO_GOOGLE_ACCOUNT_TITLE = 'No account found';
 
+/**
+ * Surfaced (as a dialog) when the account signed in fine but this device's
+ * local library could not be prepared, even after a repair retry. The session
+ * stays alive — the user is never signed out over a local-database hiccup.
+ * (Defined in a dependency-free module so sync code can share it without an
+ * import cycle; re-exported here for the auth screens.)
+ */
+export { LOCAL_LIBRARY_PREP_NOTICE } from '@/lib/localLibraryNotice';
+
 /** A user created within this window is treated as minted by the current OAuth flow. */
 export const NEW_OAUTH_USER_WINDOW_MS = 120_000;
 
 const PENDING_GOOGLE_MODE_KEY = 'watch-later.google-auth-mode.v1';
+
+/**
+ * How long a stored Google intent stays trustworthy. The router callback
+ * normally lands within seconds of the browser session settling; anything
+ * older is a leftover from a previous flow and must not decide sign-in vs
+ * sign-up for a new one.
+ */
+export const PENDING_GOOGLE_MODE_TTL_MS = 15 * 60_000;
+
+/**
+ * Single slot remembering the auth user THIS device just created.
+ *
+ * `isNewOAuthUser` (120s) is the only husk signal, so a fast re-sign-in
+ * within that window — sign out right after signup, or a restart — would
+ * roll back a perfectly legitimate brand-new account. Matching the stored id
+ * keeps the husk rollback for accounts minted elsewhere while exempting the
+ * one this device verifiably created.
+ */
+const RECENTLY_CREATED_ACCOUNT_KEY = 'watch-later.recently-created-account.v1';
+
+/** How long a device-created-account mark is honoured (matches the intent TTL). */
+export const RECENTLY_CREATED_ACCOUNT_TTL_MS = 15 * 60_000;
+
+/** Remembers a freshly created account on this device (single slot, best effort). */
+export async function markAccountCreatedOnDevice(userId: string): Promise<void> {
+  try { await AsyncStorage.setItem(RECENTLY_CREATED_ACCOUNT_KEY, JSON.stringify({ userId, at: Date.now() })); } catch { /* best effort */ }
+}
+
+/**
+ * True when this device created the given account most recently. The mark is
+ * time-bounded: a stale slot left behind by an unrelated signup months ago
+ * must never exempt a brand-new OAuth husk from rollback.
+ */
+export async function wasAccountCreatedOnDevice(userId: string): Promise<boolean> {
+  try {
+    const raw = await AsyncStorage.getItem(RECENTLY_CREATED_ACCOUNT_KEY);
+    if (!raw) return false;
+    if (raw === userId) return true; // legacy plain-id values from older builds
+    const parsed = JSON.parse(raw) as { userId?: unknown; at?: unknown };
+    if (parsed?.userId !== userId) return false;
+    if (typeof parsed.at !== 'number') return true;
+    return Date.now() - parsed.at <= RECENTLY_CREATED_ACCOUNT_TTL_MS;
+  } catch { return false; }
+}
 
 /**
  * True when the auth user was created within NEW_OAUTH_USER_WINDOW_MS of
@@ -115,8 +170,10 @@ export function isExistingAccountUser(user: { created_at?: string; identities?: 
   return Date.now() - createdAt > NEW_OAUTH_USER_WINDOW_MS;
 }
 
+interface StoredGoogleMode { mode: GoogleAuthMode; at: number }
+
 async function setPendingGoogleMode(mode: GoogleAuthMode): Promise<void> {
-  try { await AsyncStorage.setItem(PENDING_GOOGLE_MODE_KEY, mode); } catch { /* best effort */ }
+  try { await AsyncStorage.setItem(PENDING_GOOGLE_MODE_KEY, JSON.stringify({ mode, at: Date.now() } satisfies StoredGoogleMode)); } catch { /* best effort */ }
 }
 
 async function clearPendingGoogleMode(): Promise<void> {
@@ -124,15 +181,45 @@ async function clearPendingGoogleMode(): Promise<void> {
 }
 
 /**
+ * Reads the intent written by `setPendingGoogleMode`, ignoring stale or
+ * malformed values. Legacy plain-string values (no timestamp) are accepted.
+ */
+async function readFreshPendingGoogleMode(): Promise<GoogleAuthMode | null> {
+  let raw: string | null = null;
+  try { raw = await AsyncStorage.getItem(PENDING_GOOGLE_MODE_KEY); } catch { return null; }
+  if (!raw) return null;
+  if (raw === 'sign-in' || raw === 'sign-up') return raw;
+  try {
+    const parsed = JSON.parse(raw) as Partial<StoredGoogleMode>;
+    if (parsed?.mode !== 'sign-in' && parsed?.mode !== 'sign-up') return null;
+    if (typeof parsed.at !== 'number') return parsed.mode;
+    return Math.abs(Date.now() - parsed.at) <= PENDING_GOOGLE_MODE_TTL_MS ? parsed.mode : null;
+  } catch { return null; }
+}
+
+/**
+ * Fallback when no trustworthy intent survived: if this device deleted an
+ * account and never recorded a successful sign-in since, the only safe guess
+ * is sign-in — an OAuth flow that mints a brand-new user is then rolled back
+ * with "No account found" instead of being silently adopted as an empty
+ * account. Without a deletion record the permissive default stays sign-up so
+ * a lost intent can never delete a legitimate new account.
+ */
+async function resolveUnknownGoogleMode(): Promise<GoogleAuthMode> {
+  try { return (await getLastDeletedAccount()) ? 'sign-in' : 'sign-up'; } catch { return 'sign-up'; }
+}
+
+/**
  * Intent stored by signInWithGoogle for the router-delivered callback
- * (Android). Defaults to sign-up (permissive) so a lost intent can never
- * delete a legitimate new account.
+ * (Android). The stored value is consumed exactly once; when it is missing,
+ * stale, or unreadable, the mode is resolved from the device's
+ * last-deleted-account record instead of blindly defaulting to sign-up.
  */
 export async function consumePendingGoogleMode(): Promise<GoogleAuthMode> {
   try {
-    const stored = await AsyncStorage.getItem(PENDING_GOOGLE_MODE_KEY);
+    const stored = await readFreshPendingGoogleMode();
     await AsyncStorage.removeItem(PENDING_GOOGLE_MODE_KEY).catch(() => undefined);
-    return stored === 'sign-in' ? 'sign-in' : 'sign-up';
+    return stored ?? await resolveUnknownGoogleMode();
   } catch {
     return 'sign-up';
   }
@@ -142,6 +229,7 @@ function friendlyAuthError(error: AuthFailure | null, mode: 'sign-in' | 'sign-up
   const code = error?.code ?? '';
   if (code.includes('invalid_credentials') || error?.message?.toLowerCase().includes('invalid login')) return new AppError('authentication', 'Email or password is incorrect.');
   if (code.includes('already_registered') || code.includes('user_already_exists') || error?.message?.toLowerCase().includes('already registered')) return new AppError('authentication', 'This email already has an account. Sign in instead of creating one.');
+  if (code.includes('email_not_confirmed') || error?.message?.toLowerCase().includes('email not confirmed') || error?.message?.toLowerCase().includes('confirm your email')) return new AppError('authentication', 'Confirm your email address first — open the link we sent you, then sign in.');
   if (code.includes('weak_password') || error?.message?.toLowerCase().includes('password')) return new AppError('authentication', 'Choose a stronger password and try again.');
   if (error?.message?.toLowerCase().includes('network')) return new AppError('network', 'Could not reach the account service. Check your connection.');
   return new AppError('authentication', mode === 'sign-in' ? 'Unable to sign in. Please try again.' : 'Unable to create your account. Please try again.');
@@ -264,12 +352,35 @@ let oauthNoAccountFailure: AppError | null = null;
  */
 let oauthDeviceLinkFailure: DeviceLinkedError | null = null;
 
+/**
+ * Number of interactive auth flows currently running (sign in, create account,
+ * Google browser flow, router callback). The `_layout` auth listener also
+ * binds the local library on SIGNED_IN and can fail with the SAME
+ * "Couldn't prepare this account's local library." error — while a flow is in
+ * flight the flow's own screen owns the single prompt, so the listener stays
+ * quiet instead of stacking a second dialog.
+ */
+let authFlowsInFlight = 0;
+
+/** True while an interactive auth flow is running on some screen. */
+export function isAuthFlowInFlight(): boolean {
+  return authFlowsInFlight > 0;
+}
+
 export class SupabaseAuthService implements AuthService {
   constructor(
     private readonly authClient: AuthClient | null = supabase,
     private readonly migration: GuestMigrationService = guestMigrationService,
     private readonly oauth: OAuthDeps | null = null,
-    private readonly repairLocalLibrary: () => Promise<void> = () => clearDeviceLibrary(),
+    private readonly repairLocalLibrary: () => Promise<void> = async () => {
+      await clearDeviceLibrary();
+      // The wipe leaves an EMPTY local library for the new account. React
+      // Query's cached ['watch'] lists would otherwise keep showing the
+      // previous account's titles until some unrelated invalidation — a
+      // cross-account leak that sync never fixes when the new account's cloud
+      // is also empty (nothing to apply, nothing to invalidate).
+      queryClient.clear();
+    },
     private readonly hasPendingLocalChanges: () => Promise<boolean> = async () => {
       try { return (await watchStateSyncRepository.getPendingChanges()).length > 0; } catch { return true; }
     },
@@ -288,15 +399,35 @@ export class SupabaseAuthService implements AuthService {
    * clearing the local mirror loses nothing). Only when unsynced local data
    * would be destroyed does it rethrow as a DeviceLinkedError WITHOUT signing
    * out, so the UI can warn and clear-and-continue the same session.
+   *
+   * A bind that fails for any OTHER reason (lock contention, a half-written
+   * schema, a slow first open) is retried once with a repaired local library
+   * and then downgraded to a notice: the Supabase session is valid, so the
+   * user stays signed in and can retry sync, instead of being signed out
+   * behind a raw "Couldn't prepare this account's local library." dead end.
    */
-  private async connectAccountAllowingFreshRebind(accountId: string, isFresh: boolean, accountEmail?: string): Promise<void> {
+  private async connectAccountAllowingFreshRebind(accountId: string, isFresh: boolean, accountEmail?: string): Promise<{ notice?: string }> {
     try {
       await this.migration.migrateToAccount(accountId);
-      return;
+      return {};
     } catch (error) {
       if (!isDeviceLinkedError(error)) {
-        await this.requireClient().auth.signOut().catch(() => undefined);
-        throw error;
+        // First retry without touching the library: a transient failure (e.g.
+        // SQLite lock contention right after launch) clears on its own.
+        try {
+          await this.migration.migrateToAccount(accountId);
+          return {};
+        } catch { /* still failing — try a repaired local library below */ }
+        try {
+          await this.repairLocalLibrary();
+          await this.migration.migrateToAccount(accountId);
+          return {};
+        } catch {
+          // The session stays signed in; the UI surfaces this notice as a
+          // dialog so the user knows exactly what happened and that their
+          // cloud library is safe.
+          return { notice: LOCAL_LIBRARY_PREP_NOTICE };
+        }
       }
       const linked = error instanceof DeviceLinkedError
         ? error
@@ -309,7 +440,7 @@ export class SupabaseAuthService implements AuthService {
         try {
           await this.repairLocalLibrary();
           await this.migration.migrateToAccount(accountId);
-          return;
+          return {};
         } catch {
           // Fall through to the dialog path with the session still alive.
         }
@@ -325,7 +456,7 @@ export class SupabaseAuthService implements AuthService {
         try {
           await this.repairLocalLibrary();
           await this.migration.migrateToAccount(accountId);
-          return;
+          return {};
         } catch {
           // Fall through to the dialog path with the session still alive.
         }
@@ -363,45 +494,59 @@ export class SupabaseAuthService implements AuthService {
   }
 
   async signIn(email: string, password: string): Promise<SessionState> {
-    const { data, error } = await this.requireClient().auth.signInWithPassword({ email, password });
-    if (error || !data.user || !data.session) throw friendlyAuthError(error, 'sign-in');
-    await this.connectAccountAllowingFreshRebind(data.user.id, false, data.user.email ?? email);
-    await this.markAuthSuccess();
-    return { mode: 'authenticated', userId: data.user.id, email: data.user.email ?? email };
+    authFlowsInFlight += 1;
+    try {
+      const { data, error } = await this.requireClient().auth.signInWithPassword({ email, password });
+      if (error || !data.user || !data.session) throw friendlyAuthError(error, 'sign-in');
+      const { notice } = await this.connectAccountAllowingFreshRebind(data.user.id, false, data.user.email ?? email);
+      await this.markAuthSuccess();
+      return { mode: 'authenticated', userId: data.user.id, email: data.user.email ?? email, ...(notice ? { notice } : {}) };
+    } finally { authFlowsInFlight -= 1; }
   }
 
   async createAccount(email: string, password: string): Promise<SessionState> {
+    authFlowsInFlight += 1;
+    try {
+      return await this.createAccountInner(email, password);
+    } finally { authFlowsInFlight -= 1; }
+  }
+
+  private async createAccountInner(email: string, password: string): Promise<SessionState> {
     const client = this.requireClient();
     // If these exact credentials already sign in, the account exists — this is
     // a sign-in, not a signup. Probe first so an existing email is never dressed
     // up as "creating an account"; the UI then reports it as a sign-in.
     const probe = await client.auth.signInWithPassword({ email, password });
     if (!probe.error && probe.data?.user && probe.data?.session) {
-      await this.connectAccountAllowingFreshRebind(probe.data.user.id, false, probe.data.user.email ?? email);
+      const { notice } = await this.connectAccountAllowingFreshRebind(probe.data.user.id, false, probe.data.user.email ?? email);
       await this.markAuthSuccess();
       return {
         mode: 'authenticated',
         userId: probe.data.user.id,
         email: probe.data.user.email ?? email,
-        notice: EXISTING_ACCOUNT_NOTICE,
+        notice: [EXISTING_ACCOUNT_NOTICE, notice].filter(Boolean).join(' '),
       };
     }
 
     const { data, error } = await client.auth.signUp({ email, password });
     if (error || !data.user) throw friendlyAuthError(error, 'sign-up');
+    const existing = isExistingAccountUser(data.user);
+    // A genuinely new account is remembered on this device so a fast Google
+    // re-sign-in inside the husk window never rolls it back as an orphan.
+    if (!existing) await markAccountCreatedOnDevice(data.user.id);
     if (!data.session) throw new AppError('authentication', 'Check your email to confirm your account, then sign in. Your local library is unchanged.');
     // Some GoTrue configs still hand back a live session for an email that
     // ALREADY has an account (different password, auto sign-in). Treat that as
     // a sign-in too — never as a fresh signup — and don't re-migrate the local
     // library onto it as if it were brand new.
-    const existing = isExistingAccountUser(data.user);
-    await this.connectAccountAllowingFreshRebind(data.user.id, !existing, data.user.email ?? email);
+    const { notice } = await this.connectAccountAllowingFreshRebind(data.user.id, !existing, data.user.email ?? email);
     await this.markAuthSuccess();
+    const combined = [existing ? EXISTING_ACCOUNT_NOTICE : '', notice].filter(Boolean).join(' ');
     return {
       mode: 'authenticated',
       userId: data.user.id,
       email: data.user.email ?? email,
-      ...(existing ? { notice: EXISTING_ACCOUNT_NOTICE } : {}),
+      ...(combined ? { notice: combined } : {}),
     };
   }
 
@@ -445,6 +590,13 @@ export class SupabaseAuthService implements AuthService {
    * signing into an empty account (e.g. right after account deletion).
    */
   async signInWithGoogle(mode: GoogleAuthMode = 'sign-in'): Promise<SessionState> {
+    authFlowsInFlight += 1;
+    try {
+      return await this.signInWithGoogleInner(mode);
+    } finally { authFlowsInFlight -= 1; }
+  }
+
+  private async signInWithGoogleInner(mode: GoogleAuthMode): Promise<SessionState> {
     const client = this.requireClient();
     const deps = this.oauth ?? loadOAuthDeps();
     if (!client.auth.signInWithOAuth) throw new AppError('configuration', 'Google sign-in is unavailable in this build.');
@@ -474,9 +626,18 @@ export class SupabaseAuthService implements AuthService {
       oauthFinishedByRouter = false;
       if (result.type === 'success' && result.url && !finishedByRouter) {
         const params = parseOAuthRedirect(result.url);
-        if (params.error) throw new AppError('authentication', params.errorDescription ?? 'Google sign-in was declined. Please try again.');
-        if (params.code) return this.exchangeGoogleCode(params.code, mode);
-        if (params.accessToken && params.refreshToken) return this.setGoogleSession(params.accessToken, params.refreshToken, mode);
+        // This call consumed the redirect itself, so the stored intent is no
+        // longer needed. (It is deliberately NOT cleared in a `finally`: on
+        // Android the browser session settles as "dismiss" while the router
+        // callback is still pending, and clearing here is exactly what lost
+        // the sign-in intent — see consumePendingGoogleMode.)
+        if (params.error) {
+          await clearPendingGoogleMode();
+          throw new AppError('authentication', params.errorDescription ?? 'Google sign-in was declined. Please try again.');
+        }
+        if (params.code) return this.exchangeGoogleCode(params.code, mode).finally(clearPendingGoogleMode);
+        if (params.accessToken && params.refreshToken) return this.setGoogleSession(params.accessToken, params.refreshToken, mode).finally(clearPendingGoogleMode);
+        await clearPendingGoogleMode();
         throw new AppError('authentication', 'Google sign-in did not return a session. Please try again.');
       }
       // The browser session came back empty-handed but the flow may still have
@@ -486,10 +647,21 @@ export class SupabaseAuthService implements AuthService {
       if ((finishedByRouter || sessionAfter !== sessionBefore) && (await this.isLiveSession())) return this.authenticatedSession(mode);
       if (oauthNoAccountFailure) throw oauthNoAccountFailure;
       if (oauthDeviceLinkFailure) throw oauthDeviceLinkFailure;
+      // "cancel"/"dismiss" here may still be the Android race: the redirect
+      // went to the router, whose callback is pending and will consume the
+      // stored intent — so it must survive this throw.
       if (result.type === 'cancel' || result.type === 'dismiss') throw new AppError('authentication', 'Google sign-in was cancelled.');
       throw new AppError('authentication', 'Google sign-in did not complete. Please try again.');
-    } finally {
-      await clearPendingGoogleMode();
+    } catch (cause) {
+      // Deliberately NOT a `finally`: on Android the browser session settles
+      // as "dismiss" while the router callback is still pending, and clearing
+      // the stored intent there is exactly what lost sign-in vs sign-up for
+      // that callback (see consumePendingGoogleMode). A failure raised before
+      // or without a delivered redirect means no callback is coming, so the
+      // intent is dropped; the cancel/dismiss rejection keeps it.
+      const cancelled = cause instanceof AppError && cause.message === 'Google sign-in was cancelled.';
+      if (!cancelled) await clearPendingGoogleMode();
+      throw cause;
     }
   }
 
@@ -506,25 +678,28 @@ export class SupabaseAuthService implements AuthService {
     params: { code?: string; accessToken?: string; refreshToken?: string; error?: string; errorDescription?: string },
     mode?: GoogleAuthMode,
   ): Promise<SessionState> {
-    const resolvedMode = mode ?? await consumePendingGoogleMode();
+    authFlowsInFlight += 1;
     try {
-      const session = await this.resolveGoogleCallback(params, resolvedMode);
-      // Only a completed flow unblocks the pending browser session.
-      oauthFinishedByRouter = true;
-      return session;
-    } catch (cause) {
-      if (cause instanceof AppError && cause.message === NO_GOOGLE_ACCOUNT_MESSAGE) {
-        // Unblock the pending browser session and hand it the real reason.
+      const resolvedMode = mode ?? await consumePendingGoogleMode();
+      try {
+        const session = await this.resolveGoogleCallback(params, resolvedMode);
+        // Only a completed flow unblocks the pending browser session.
         oauthFinishedByRouter = true;
-        oauthNoAccountFailure = cause;
-      } else if (cause instanceof DeviceLinkedError) {
-        // The sign-in screen owns the single "Clear & continue" dialog and
-        // finishes the same session — no toast, no second browser trip.
-        oauthFinishedByRouter = true;
-        oauthDeviceLinkFailure = cause;
+        return session;
+      } catch (cause) {
+        if (cause instanceof AppError && cause.message === NO_GOOGLE_ACCOUNT_MESSAGE) {
+          // Unblock the pending browser session and hand it the real reason.
+          oauthFinishedByRouter = true;
+          oauthNoAccountFailure = cause;
+        } else if (cause instanceof DeviceLinkedError) {
+          // The sign-in screen owns the single "Clear & continue" dialog and
+          // finishes the same session — no toast, no second browser trip.
+          oauthFinishedByRouter = true;
+          oauthDeviceLinkFailure = cause;
+        }
+        throw cause;
       }
-      throw cause;
-    }
+    } finally { authFlowsInFlight -= 1; }
   }
 
   private async resolveGoogleCallback(
@@ -584,14 +759,74 @@ export class SupabaseAuthService implements AuthService {
     }
     // Sign-in must never adopt an account this flow just created (e.g. the
     // same Google email right after account deletion). Check before the local
-    // library is bound so nothing is migrated onto the husk.
-    if (mode === 'sign-in' && isNewOAuthUser(user)) {
+    // library is bound so nothing is migrated onto the husk — unless this
+    // device created it moments ago, where a fast re-sign-in (sign-out right
+    // after signup, restart) would otherwise delete the real new account.
+    if (mode === 'sign-in' && isNewOAuthUser(user) && !(await wasAccountCreatedOnDevice(user.id))) {
       await this.rollbackAutoCreatedUser();
       throw new AppError('authentication', NO_GOOGLE_ACCOUNT_MESSAGE);
     }
-    await this.connectAccountAllowingFreshRebind(user.id, mode === 'sign-up' && isNewOAuthUser(user), user.email);
+    const freshSignup = mode === 'sign-up' && isNewOAuthUser(user);
+    if (freshSignup) await markAccountCreatedOnDevice(user.id);
+    const { notice } = await this.connectAccountAllowingFreshRebind(user.id, freshSignup, user.email);
     await this.markAuthSuccess();
-    return { mode: 'authenticated', userId: user.id, email: user.email ?? '' };
+    const combined = [
+      // "Create account" that resolved to an account which already existed
+      // says so out loud — same contract as the email signup path, so a
+      // Google signup never silently reads as a brand-new account.
+      mode === 'sign-up' && isExistingAccountUser(user) ? EXISTING_ACCOUNT_NOTICE : '',
+      notice,
+    ].filter(Boolean).join(' ');
+    return {
+      mode: 'authenticated',
+      userId: user.id,
+      email: user.email ?? '',
+      ...(combined ? { notice: combined } : {}),
+    };
+  }
+
+  /**
+   * Completes a Clerk Google SSO sign-in: binds the device library to the
+   * Clerk identity and returns the app session. Supabase data access for this
+   * identity flows through third-party auth (see `ClerkSupabaseBridge`), so
+   * no Supabase Auth session is created here.
+   *
+   * Sign-in keeps the no-husk contract: a brand-new Clerk user while a
+   * deletion is outstanding on this device is signed straight back out and
+   * reported as "no account found" instead of adopted as an empty account.
+   * The caller owns the Clerk session lifecycle (`clerkSignOut`); this method
+   * never touches Clerk directly, which keeps it unit-testable.
+   */
+  async signInWithClerk(input: {
+    userId: string;
+    email: string;
+    /** Epoch ms of the Clerk user's creation, or null when unknown. */
+    createdAtMs: number | null;
+    googleMode: GoogleAuthMode;
+    clerkSignOut: () => Promise<void>;
+  }): Promise<SessionState> {
+    authFlowsInFlight += 1;
+    try {
+      const { userId, email, createdAtMs, googleMode, clerkSignOut } = input;
+      const fresh = createdAtMs !== null && Date.now() - createdAtMs >= 0 && Date.now() - createdAtMs <= NEW_OAUTH_USER_WINDOW_MS;
+      if (googleMode === 'sign-in' && fresh && !(await wasAccountCreatedOnDevice(userId))) {
+        await clerkSignOut().catch(() => undefined);
+        throw new AppError('authentication', NO_GOOGLE_ACCOUNT_MESSAGE);
+      }
+      const freshSignup = googleMode === 'sign-up' && fresh;
+      if (freshSignup) await markAccountCreatedOnDevice(userId);
+      const { notice } = await this.connectAccountAllowingFreshRebind(userId, freshSignup, email);
+      await this.markAuthSuccess();
+      const existingAccount = googleMode === 'sign-up' && createdAtMs !== null && !fresh;
+      const combined = [existingAccount ? EXISTING_ACCOUNT_NOTICE : '', notice].filter(Boolean).join(' ');
+      return {
+        mode: 'authenticated',
+        userId,
+        email,
+        provider: 'clerk',
+        ...(combined ? { notice: combined } : {}),
+      };
+    } finally { authFlowsInFlight -= 1; }
   }
 
   /**
@@ -609,7 +844,27 @@ export class SupabaseAuthService implements AuthService {
 
   async signOut(): Promise<void> {
     const client = this.requireClient();
-    const { error } = await client.auth.signOut();
-    if (error) throw new AppError('authentication', 'Unable to log out.', { cause: error });
+    let failure: unknown = null;
+    try {
+      const { error } = await client.auth.signOut();
+      failure = error;
+    } catch (cause) {
+      failure = cause;
+    }
+    if (!failure) return;
+    // supabase-js drops the LOCAL session even when the server-side revoke
+    // fails (offline, expired JWT): `removeCurrentSession()` runs first and
+    // only then is the error returned. If no session survives on the device
+    // the user really is signed out — throwing "Unable to log out." over a
+    // completed sign-out shows a failure dialog for something that worked.
+    if (client.auth.getSession) {
+      try {
+        const { data } = await client.auth.getSession();
+        if (!data.session) return;
+      } catch {
+        // Session state unreadable — report the original failure below.
+      }
+    }
+    throw new AppError('authentication', 'Unable to log out.', { cause: failure instanceof Error ? failure : undefined });
   }
 }

@@ -2,10 +2,13 @@ import { useEffect, useRef, useState } from 'react';
 import { router, useLocalSearchParams } from 'expo-router';
 import { Screen } from '@/components/common/Screen';
 import { LoadingView } from '@/components/feedback/FeedbackViews';
-import { showToast } from '@/components/feedback/AppDialog';
-import { DeviceLinkedError, NO_GOOGLE_ACCOUNT_MESSAGE, SupabaseAuthService, consumePendingGoogleMode } from '@/features/auth/SupabaseAuthService';
+import { showDialogUnlessQueued } from '@/components/feedback/AppDialog';
+import { showFriendlyError } from '@/lib/friendlyError';
+import { LOCAL_LIBRARY_PREP_TITLE } from '@/lib/localLibraryNotice';
+import { DeviceLinkedError, EXISTING_ACCOUNT_NOTICE, NO_GOOGLE_ACCOUNT_MESSAGE, SupabaseAuthService, consumePendingGoogleMode } from '@/features/auth/SupabaseAuthService';
 import { persistSession } from '@/store/app/sessionPersistence';
 import { useSessionStore } from '@/store/app/sessionStore';
+import { useSyncStore } from '@/store/app/syncStore';
 import { scheduleAutoSync } from '@/features/sync/autoSync';
 
 const authService = new SupabaseAuthService();
@@ -51,16 +54,34 @@ export default function AuthCallbackScreen() {
         await persistSession(session, true);
         useSessionStore.getState().setSession(session);
         useSessionStore.getState().setOnboardingComplete(true);
+        // Parity with AuthForm.finishAuth: a new sign-in starts from a clean
+        // sync slate — the previous account's pending/error status must not
+        // decorate this one on the Android router path.
+        useSyncStore.getState().reset();
         if (session.mode === 'authenticated') scheduleAutoSync('auth');
         router.replace('/(tabs)');
+        // Google "create account" that resolved to an existing account
+        // (Android router path) — the sign-in screen may never render here, so
+        // the notice is surfaced from this landing route instead.
+        if (session.mode === 'authenticated' && session.notice) {
+          const isExistingAccount = session.notice.includes(EXISTING_ACCOUNT_NOTICE);
+          // Same title + copy as the auth screen's notice dialog, so the
+          // queue collapses any overlap into ONE prompt.
+          void showDialogUnlessQueued({
+            type: isExistingAccount ? 'info' : 'warning',
+            title: isExistingAccount ? 'You already have an account' : LOCAL_LIBRARY_PREP_TITLE,
+            message: session.notice,
+            primaryAction: { label: 'Continue' },
+          });
+        }
       } catch (cause) {
         // "No account" and device-link outcomes are owned by the sign-in
         // screen (inline error + actions), which is already waiting on this
-        // same flow — toasting here would double-surface them. Other failures
-        // still toast before returning to retry.
+        // same flow — a second prompt here would double-surface them. Every
+        // other failure gets a dialog (not a toast) before returning to retry.
         const silent = cause instanceof DeviceLinkedError
           || (cause instanceof Error && cause.message === NO_GOOGLE_ACCOUNT_MESSAGE);
-        if (!silent) showToast(cause instanceof Error ? cause.message : 'Google sign-in failed. Please try again.', 'error');
+        if (!silent) await showFriendlyError(cause, 'Google sign-in failed');
         if (router.canGoBack()) router.back();
         else router.replace('/(tabs)');
       }

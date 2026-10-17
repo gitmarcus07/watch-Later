@@ -13,7 +13,7 @@ const logo = require('../assets/logo.png');
 const highlights: { icon: keyof typeof Ionicons.glyphMap; title: string; detail: string }[] = [
   { icon: 'bookmark-outline', title: 'Track anything', detail: 'Movies, TV series and anime in one library.' },
   { icon: 'checkmark-done-outline', title: 'Episode-level progress', detail: 'Pick up exactly where you stopped, season by season.' },
-  { icon: 'cloud-outline', title: 'Optional cloud sync', detail: 'Sign in and your library follows you across devices.' },
+  { icon: 'shield-checkmark-outline', title: 'Private by design', detail: 'No accounts, no tracking. Everything stays on this device.' },
 ];
 
 const acknowledgements: { icon: keyof typeof Ionicons.glyphMap; text: string }[] = [
@@ -30,10 +30,10 @@ export default function AboutScreen() {
 
     <View style={styles.hero}>
       <View style={styles.logoGlow}><View style={styles.logoRing}><Image source={logo} style={styles.logo} resizeMode="cover" /></View></View>
-      <AppText variant="heading1" style={styles.brand}>Watch Later</AppText>
+      <AppText variant="heading1" style={styles.brand}>watch Later</AppText>
       <View style={styles.versionPill}><Ionicons name="pricetag-outline" size={11} color={colors.accent} /><AppText variant="caption" style={styles.versionText}>VERSION {version}</AppText></View>
       <AppText muted style={styles.tagline}>
-        A personal tracker for movies, TV series and anime. Save what you want to watch, track what you finish, and pick up right where you left off — on this device, with optional cloud sync when you sign in.
+        A personal tracker for movies, TV series and anime. Save what you want to watch, track what you finish, and pick up right where you left off — everything stays on this device.
       </AppText>
     </View>
 

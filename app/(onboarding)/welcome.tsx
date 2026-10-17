@@ -18,6 +18,7 @@ import { AppButton } from '@/components/buttons/AppButton';
 import { AppText } from '@/components/common/AppText';
 import { PosterBackdrop } from '@/components/onboarding/PosterBackdrop';
 import { SupabaseAuthService } from '@/features/auth/SupabaseAuthService';
+import { showFriendlyError } from '@/lib/friendlyError';
 import { colors, radius, shadows, spacing } from '@/theme';
 import { persistSession } from '@/store/app/sessionPersistence';
 import { useSessionStore } from '@/store/app/sessionStore';
@@ -30,11 +31,49 @@ const HERO_POSTERS = [
   { uri: 'https://image.tmdb.org/t/p/w342/ggFHVNu6YYI5L9pCfOacjizRGt.jpg', label: 'Breaking Bad' },
 ];
 
-const HIGHLIGHTS = [
-  { icon: 'bookmark', label: 'Track it all' },
-  { icon: 'notifications-outline', label: 'Never miss out' },
-  { icon: 'sync-outline', label: 'Yours everywhere' },
-] as const;
+interface TourPage {
+  eyebrow: string;
+  titleA: string;
+  titleB: string;
+  description: string;
+  icon: keyof typeof Ionicons.glyphMap;
+  visual: 'posters' | 'medallion';
+}
+
+const PAGES: TourPage[] = [
+  {
+    eyebrow: 'WATCH LATER',
+    titleA: 'Stories worth',
+    titleB: 'remembering.',
+    description: 'Track what you want to watch and remember everything you’ve watched.',
+    icon: 'bookmark',
+    visual: 'posters',
+  },
+  {
+    eyebrow: 'YOUR WATCHLIST',
+    titleA: 'Save it',
+    titleB: 'for later.',
+    description: 'Bookmark movies, shows and anime into your watchlist, in the order you want them.',
+    icon: 'bookmark',
+    visual: 'medallion',
+  },
+  {
+    eyebrow: 'SEASONS & EPISODES',
+    titleA: 'Pick up where',
+    titleB: 'you stopped.',
+    description: 'Track series season by season and episode by episode — progress, rewatch counts and all.',
+    icon: 'tv',
+    visual: 'medallion',
+  },
+  {
+    eyebrow: 'BROWSE & DISCOVER',
+    titleA: 'Find what’s',
+    titleB: 'next.',
+    description: 'Browse upcoming releases, franchises in order, new arrivals and all-time top lists.',
+    icon: 'compass',
+    visual: 'medallion',
+  },
+];
 
 function FloatingPoster({ uri, label, rotate, size, delay, duration, distance, enterDelay }: {
   uri: string;
@@ -84,21 +123,23 @@ function GlowOrb() {
 }
 
 export default function WelcomeScreen() {
+  const [page, setPage] = useState(0);
   const [loading, setLoading] = useState(false);
-  const [error, setError] = useState('');
   const { setSession, setOnboardingComplete } = useSessionStore();
+  const last = page === PAGES.length - 1;
+  const content = PAGES[page];
 
-  async function enterGuestMode() {
+  async function finish() {
     setLoading(true);
-    setError('');
     try {
       const session = await authService.continueAsGuest();
       await persistSession(session, true);
       setSession(session);
       setOnboardingComplete(true);
       router.replace('/(tabs)');
-    } catch {
-      setError('We couldn’t start guest mode. Please try again.');
+    } catch (cause) {
+      // A prompt, not a line of text nobody notices under the buttons.
+      await showFriendlyError(cause, 'Couldn’t start', { message: 'We couldn’t open your library. Your data is safe — please try again.' });
     } finally {
       setLoading(false);
     }
@@ -108,41 +149,59 @@ export default function WelcomeScreen() {
     <View style={styles.root}>
       <PosterBackdrop rowCount={3} opacity={0.5} />
 
-      <Animated.View entering={FadeInUp.duration(650)} style={styles.hero}>
+      <Animated.View key={`hero-${page}`} entering={FadeInUp.duration(650)} style={styles.hero}>
         <GlowOrb />
-        <View style={styles.fan}>
-          <FloatingPoster uri={HERO_POSTERS[0].uri} label={HERO_POSTERS[0].label} rotate="-10deg" size={styles.posterSide} delay={200} duration={3400} distance={10} enterDelay={120} />
-          <FloatingPoster uri={HERO_POSTERS[1].uri} label={HERO_POSTERS[1].label} rotate="0deg" size={styles.posterCenter} delay={0} duration={3000} distance={12} enterDelay={0} />
-          <FloatingPoster uri={HERO_POSTERS[2].uri} label={HERO_POSTERS[2].label} rotate="10deg" size={styles.posterSide} delay={500} duration={3700} distance={9} enterDelay={240} />
-        </View>
+        {content.visual === 'posters' ? (
+          <View style={styles.fan}>
+            <FloatingPoster uri={HERO_POSTERS[0].uri} label={HERO_POSTERS[0].label} rotate="-10deg" size={styles.posterSide} delay={200} duration={3400} distance={10} enterDelay={120} />
+            <FloatingPoster uri={HERO_POSTERS[1].uri} label={HERO_POSTERS[1].label} rotate="0deg" size={styles.posterCenter} delay={0} duration={3000} distance={12} enterDelay={0} />
+            <FloatingPoster uri={HERO_POSTERS[2].uri} label={HERO_POSTERS[2].label} rotate="10deg" size={styles.posterSide} delay={500} duration={3700} distance={9} enterDelay={240} />
+          </View>
+        ) : (
+          <View style={styles.medallionWrap}>
+            <Animated.View entering={FadeIn.delay(120).duration(600)} style={styles.medallionRing}>
+              <View style={styles.medallion}>
+                <Ionicons name={content.icon} size={64} color={colors.accent} />
+              </View>
+            </Animated.View>
+          </View>
+        )}
         <View style={styles.brandRow}>
           <View style={styles.brandIcon}><Ionicons name="bookmark" size={18} color={colors.background} /></View>
-          <AppText variant="label" style={styles.brand}>Watch Later</AppText>
+          <AppText variant="label" style={styles.brand}>watch Later</AppText>
         </View>
         <View style={styles.badge}><Ionicons name="sparkles" size={13} color={colors.accent} /><AppText variant="caption" style={styles.badgeText}>MOVIES · SHOWS · ANIME</AppText></View>
       </Animated.View>
 
-      <Animated.View entering={FadeInDown.delay(160).duration(700)} style={styles.copy}>
-        <AppText variant="display" style={styles.title}>Stories worth{'\n'}<AppText variant="display" style={styles.titleAccent}>remembering.</AppText></AppText>
-        <AppText variant="body" muted style={styles.description}>Track what you want to watch and remember everything you’ve watched.</AppText>
-        <View style={styles.highlights}>
-          {HIGHLIGHTS.map((item) => (
-            <View key={item.label} style={styles.highlight}>
-              <View style={styles.highlightIcon}><Ionicons name={item.icon} size={16} color={colors.accent} /></View>
-              <AppText variant="caption" style={styles.highlightText}>{item.label}</AppText>
-            </View>
+      <Animated.View key={`copy-${page}`} entering={FadeInDown.delay(160).duration(700)} style={styles.copy}>
+        <AppText variant="caption" style={styles.eyebrow}>{content.eyebrow}</AppText>
+        <AppText variant="display" style={styles.title}>{content.titleA}{'\n'}<AppText variant="display" style={styles.titleAccent}>{content.titleB}</AppText></AppText>
+        <AppText variant="body" muted style={styles.description}>{content.description}</AppText>
+        <View style={styles.dots} accessibilityRole="adjustable" accessibilityLabel={`Page ${page + 1} of ${PAGES.length}`}>
+          {PAGES.map((_, index) => (
+            <View key={index} style={[styles.dot, index === page && styles.dotActive]} />
           ))}
         </View>
       </Animated.View>
 
-      <Animated.View entering={FadeInDown.delay(300).duration(700)} style={styles.actions}>
-        <AppButton label="Continue as Guest" onPress={enterGuestMode} loading={loading} icon={<Ionicons name="arrow-forward" size={19} color={colors.background} />} />
-        {error ? <AppText accessibilityRole="alert" muted style={styles.error}>{error}</AppText> : null}
-        <View style={styles.accountRow}>
-          <Pressable accessibilityRole="button" accessibilityLabel="Create account" onPress={() => router.push('/(auth)/create-account')} style={styles.accountButton}><AppText variant="bodySmall" style={styles.accountText}>Create account</AppText></Pressable>
-          <View style={styles.separator} />
-          <Pressable accessibilityRole="button" accessibilityLabel="Log in" onPress={() => router.push('/(auth)/login')} style={styles.accountButton}><AppText variant="bodySmall" style={styles.accountText}>Log in</AppText></Pressable>
-        </View>
+      <Animated.View key={`actions-${page}`} entering={FadeInDown.delay(300).duration(700)} style={styles.actions}>
+        {last ? (
+          <AppButton label="Start watching" onPress={() => void finish()} loading={loading} icon={<Ionicons name="arrow-forward" size={19} color={colors.background} />} />
+        ) : (
+          <AppButton label="Next" onPress={() => setPage(page + 1)} icon={<Ionicons name="arrow-forward" size={19} color={colors.background} />} />
+        )}
+        {last ? null : (
+          <View style={styles.secondaryRow}>
+            {page > 0 ? (
+              <Pressable accessibilityRole="button" accessibilityLabel="Go back" onPress={() => setPage(page - 1)} style={styles.secondaryButton}>
+                <AppText variant="bodySmall" style={styles.secondaryText}>Back</AppText>
+              </Pressable>
+            ) : <View style={styles.secondarySpacer} />}
+            <Pressable accessibilityRole="button" accessibilityLabel="Skip tour" onPress={() => void finish()} style={styles.secondaryButton}>
+              <AppText variant="bodySmall" style={styles.secondaryText}>Skip</AppText>
+            </Pressable>
+          </View>
+        )}
         <View style={styles.privacy}><Ionicons name="lock-closed-outline" size={13} color={colors.textMuted} /><Pressable accessibilityRole="button" accessibilityLabel="Read our privacy notice" onPress={() => router.push('/privacy')}><AppText variant="caption" muted style={styles.privacyText}>Your collection stays yours</AppText></Pressable></View>
       </Animated.View>
     </View>
@@ -159,25 +218,27 @@ const styles = StyleSheet.create({
   posterCenter: { width: 122, height: 178, borderColor: 'rgba(242,229,255,0.55)' },
   posterFallback: { alignItems: 'center', justifyContent: 'center' },
   posterShade: { position: 'absolute', left: 0, right: 0, bottom: 0, height: 64 },
+  medallionWrap: { flexDirection: 'row', justifyContent: 'center', paddingTop: spacing.xl },
+  medallionRing: { padding: 10, borderRadius: 58, borderWidth: 1, borderColor: 'rgba(168,85,247,0.35)', backgroundColor: 'rgba(168,85,247,0.08)' },
+  medallion: { width: 168, height: 168, borderRadius: 48, backgroundColor: 'rgba(22,22,28,0.94)', borderWidth: 1, borderColor: 'rgba(236,221,255,0.4)', alignItems: 'center', justifyContent: 'center', ...shadows.card },
   brandRow: { flexDirection: 'row', alignItems: 'center', gap: spacing.sm, marginTop: spacing.lg },
   brandIcon: { width: 32, height: 32, borderRadius: 11, backgroundColor: colors.accent, alignItems: 'center', justifyContent: 'center' },
   brand: { letterSpacing: 2.4, color: '#E9E2F5', fontSize: 11 },
   badge: { position: 'absolute', top: spacing.xl, right: 0, flexDirection: 'row', gap: spacing.xs, alignItems: 'center', backgroundColor: 'rgba(15,15,23,0.62)', paddingHorizontal: 11, paddingVertical: 8, borderRadius: radius.pill, borderColor: 'rgba(255,255,255,0.13)', borderWidth: 1 },
   badgeText: { color: '#F0EAFB', fontSize: 10, letterSpacing: 1.1, fontWeight: '600' },
   copy: { flex: 1, justifyContent: 'center', paddingTop: spacing.md },
+  eyebrow: { color: colors.accent, letterSpacing: 2.4 },
   title: { fontSize: 37, lineHeight: 43, letterSpacing: -1.4 },
   titleAccent: { color: colors.accent },
   description: { maxWidth: 310, marginTop: spacing.md, color: '#AAA9B7', lineHeight: 23 },
-  highlights: { flexDirection: 'row', gap: spacing.sm, marginTop: spacing.lg },
-  highlight: { flex: 1, flexDirection: 'row', alignItems: 'center', gap: spacing.xs, backgroundColor: 'rgba(15,15,23,0.55)', borderColor: 'rgba(255,255,255,0.1)', borderWidth: 1, borderRadius: radius.pill, paddingHorizontal: spacing.md, paddingVertical: spacing.sm },
-  highlightIcon: { width: 26, height: 26, borderRadius: 13, backgroundColor: 'rgba(168,85,247,0.14)', alignItems: 'center', justifyContent: 'center' },
-  highlightText: { color: '#E9E2F5', fontSize: 10, flexShrink: 1 },
+  dots: { flexDirection: 'row', gap: spacing.xs, marginTop: spacing.lg },
+  dot: { width: 8, height: 8, borderRadius: 4, backgroundColor: 'rgba(255,255,255,0.22)' },
+  dotActive: { width: 26, backgroundColor: colors.accent },
   actions: { paddingBottom: spacing.md, gap: spacing.sm },
-  accountRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'center', gap: spacing.lg, minHeight: 42 },
-  accountButton: { minHeight: 44, minWidth: 120, paddingHorizontal: spacing.md, alignItems: 'center', justifyContent: 'center' },
-  separator: { width: 1, height: 17, backgroundColor: colors.border },
-  accountText: { color: '#D2CFDB', fontWeight: '500' },
+  secondaryRow: { flexDirection: 'row', alignItems: 'center', justifyContent: 'space-between' },
+  secondaryButton: { minHeight: 44, minWidth: 96, paddingHorizontal: spacing.md, alignItems: 'center', justifyContent: 'center' },
+  secondarySpacer: { minWidth: 96 },
+  secondaryText: { color: '#D2CFDB', fontWeight: '500' },
   privacy: { flexDirection: 'row', justifyContent: 'center', alignItems: 'center', gap: 6, marginTop: spacing.xs },
   privacyText: { color: colors.textMuted, fontSize: 11 },
-  error: { color: colors.error, textAlign: 'center' },
 });

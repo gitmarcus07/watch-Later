@@ -1,3 +1,5 @@
+import { ClerkProvider } from "@clerk/expo";
+import { tokenCache } from "@clerk/expo/token-cache";
 import { Stack, router } from "expo-router";
 import { StatusBar } from "expo-status-bar";
 import * as SplashScreen from "expo-splash-screen";
@@ -36,8 +38,31 @@ import { Notifications } from "@/lib/notifications";
 import notifee from "@notifee/react-native";
 import "@/features/notifications/releaseDayBackground";
 import { refreshOttReminders } from "@/features/ott/ottReminders";
-import { ensureReleasesChannel, handleMoveToAsap, interpretReleaseDayEvent, isReleaseDayData, refreshUpcomingReminders, resolveNotificationTarget } from "@/features/notifications/upcomingReminders";
+import {
+  ensureReleasesChannel,
+  handleMoveToAsap,
+  interpretReleaseDayEvent,
+  isReleaseDayData,
+  refreshUpcomingReminders,
+  resolveNotificationTarget,
+} from "@/features/notifications/upcomingReminders";
 import { watchStateSyncRepository } from "@/data/local/repositories/SqliteWatchStateRepository";
+import { ClerkSupabaseBridge } from "@/features/auth/ClerkSupabaseBridge";
+import { isAuthFlowInFlight } from "@/features/auth/SupabaseAuthService";
+import { showFriendlyError } from "@/lib/friendlyError";
+import {
+  isLocalLibraryPrepFailure,
+  LOCAL_LIBRARY_PREP_NOTICE,
+  LOCAL_LIBRARY_PREP_TITLE,
+} from "@/lib/localLibraryNotice";
+
+const publishableKey = process.env.EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY ?? "";
+
+if (!publishableKey) {
+  throw new Error(
+    "Missing EXPO_PUBLIC_CLERK_PUBLISHABLE_KEY. Add your key to .env.\nRun: 1) clerk auth login  2) clerk link  3) clerk env pull — then restart the dev server.",
+  );
+}
 
 const database = new SqliteDatabaseRepository();
 
@@ -97,9 +122,12 @@ export default function RootLayout() {
                 const current = useSessionStore.getState();
                 current.setSession(authenticated);
                 await persistSession(authenticated, current.onboardingComplete);
-                // A new sign-in starts from a clean sync slate; the previous
-                // account's "needs attention"/"offline" status must not linger.
-                useSyncStore.getState().reset();
+                // Only a NEW sign-in starts from a clean sync slate. A token
+                // refresh (hourly, and on foreground) re-attests the same
+                // account — resetting there masked a real 'pending'/'error'
+                // status the profile screen must keep showing until the next
+                // sync attempt (which auto-sync may still owe behind backoff).
+                if (event === "SIGNED_IN") useSyncStore.getState().reset();
                 if (
                   event === "SIGNED_IN" ||
                   event === "INITIAL_SESSION" ||
@@ -114,20 +142,34 @@ export default function RootLayout() {
                 // showing an account with no live Supabase session — which sync
                 // then reports as "Sign in again to sync this library".
                 logger.error("Account binding failed during auth event", error);
+                // "Couldn't prepare this account's local library." must never
+                // pass silently (prompt rule). While an interactive sign-in /
+                // sign-up / Google flow is running, that flow's own screen
+                // already reports the same failure — stay quiet here so the
+                // user gets ONE prompt, not two.
+                if (!isAuthFlowInFlight() && isLocalLibraryPrepFailure(error)) {
+                  // Same title + copy as the auth screen's notice dialog, so
+                  // showFriendlyError collapses any overlap into ONE prompt.
+                  void showFriendlyError(error, LOCAL_LIBRARY_PREP_TITLE, {
+                    message: LOCAL_LIBRARY_PREP_NOTICE,
+                  });
+                }
               });
           }, 0);
-        } else if (
-          event === "SIGNED_OUT" &&
-          useSessionStore.getState().session.mode === "authenticated"
-        ) {
-          const current = useSessionStore.getState();
+        } else if (event === "SIGNED_OUT") {
+          // A Clerk session has no Supabase session behind it: INITIAL_SESSION
+          // (null) and sign-outs of the untouched Supabase client must never
+          // flip a Clerk user back to guest.
+          const current = useSessionStore.getState().session;
+          if (current.mode !== "authenticated" || current.provider === "clerk") return;
+          const store = useSessionStore.getState();
           const guest = {
             mode: "guest" as const,
             userId: `guest-${Date.now()}`,
           };
-          current.setSession(guest);
+          store.setSession(guest);
           useSyncStore.getState().reset();
-          void persistSession(guest, current.onboardingComplete);
+          void persistSession(guest, store.onboardingComplete);
         }
       },
     );
@@ -155,11 +197,15 @@ export default function RootLayout() {
   // crash startup.
   useEffect(() => {
     try {
-      const subscription = Notifications.addNotificationResponseReceivedListener((response) => {
-        const data = response.notification.request.content.data as { route?: string; mediaId?: string } | null;
-        const target = resolveNotificationTarget(data);
-        if (target) router.replace(target);
-      });
+      const subscription =
+        Notifications.addNotificationResponseReceivedListener((response) => {
+          const data = response.notification.request.content.data as {
+            route?: string;
+            mediaId?: string;
+          } | null;
+          const target = resolveNotificationTarget(data);
+          if (target) router.replace(target);
+        });
       return () => subscription.remove();
     } catch {
       return undefined;
@@ -173,10 +219,16 @@ export default function RootLayout() {
     try {
       return notifee.onForegroundEvent(async ({ type, detail }) => {
         const outcome = interpretReleaseDayEvent({ type, detail });
-        if (outcome.kind === 'open') {
-          router.replace({ pathname: '/media/[id]', params: { id: outcome.mediaId } });
-        } else if (outcome.kind === 'move') {
-          await handleMoveToAsap({ data: outcome.data, notificationId: outcome.notificationId });
+        if (outcome.kind === "open") {
+          router.replace({
+            pathname: "/media/[id]",
+            params: { id: outcome.mediaId },
+          });
+        } else if (outcome.kind === "move") {
+          await handleMoveToAsap({
+            data: outcome.data,
+            notificationId: outcome.notificationId,
+          });
         }
       });
     } catch {
@@ -193,7 +245,10 @@ export default function RootLayout() {
         const initial = await notifee.getInitialNotification();
         const data: unknown = initial?.notification?.data ?? null;
         if (isReleaseDayData(data)) {
-          router.replace({ pathname: '/media/[id]', params: { id: data.mediaId } });
+          router.replace({
+            pathname: "/media/[id]",
+            params: { id: data.mediaId },
+          });
         }
       } catch {
         // No native module or no initial notification: nothing to route.
@@ -205,55 +260,58 @@ export default function RootLayout() {
   const appReady = hydrated && (databaseReady || startupError);
 
   return (
-    <AppErrorBoundary>
-      <GestureHandlerRootView style={styles.root} onLayout={handleRootLayout}>
-        <DialogProvider>
-          <SafeAreaProvider>
-            <QueryClientProvider client={queryClient}>
-              <StatusBar style="light" />
-              {appReady ? (
-                <Stack
-                  screenOptions={{
-                    headerShown: false,
-                    contentStyle: { backgroundColor: colors.background },
-                    animation: "fade",
-                  }}
-                >
-                  <Stack.Screen name="index" />
-                  <Stack.Screen name="(onboarding)/welcome" />
-                  <Stack.Screen name="(tabs)" />
-                  <Stack.Screen
-                    name="(auth)/login"
-                    options={{ presentation: "modal" }}
+    <ClerkProvider publishableKey={publishableKey} tokenCache={tokenCache}>
+      <ClerkSupabaseBridge />
+      <AppErrorBoundary>
+        <GestureHandlerRootView style={styles.root} onLayout={handleRootLayout}>
+          <DialogProvider>
+            <SafeAreaProvider>
+              <QueryClientProvider client={queryClient}>
+                <StatusBar style="light" />
+                {appReady ? (
+                  <Stack
+                    screenOptions={{
+                      headerShown: false,
+                      contentStyle: { backgroundColor: colors.background },
+                      animation: "fade",
+                    }}
+                  >
+                    <Stack.Screen name="index" />
+                    <Stack.Screen name="(onboarding)/welcome" />
+                    <Stack.Screen name="(tabs)" />
+                    <Stack.Screen
+                      name="(auth)/login"
+                      options={{ presentation: "modal" }}
+                    />
+                    <Stack.Screen
+                      name="(auth)/create-account"
+                      options={{ presentation: "modal" }}
+                    />
+                  </Stack>
+                ) : (
+                  <View style={styles.startup}>
+                    <LoadingView label="Getting things ready" />
+                  </View>
+                )}
+                {!splashDone ? (
+                  <SplashScreenView
+                    isReady={appReady}
+                    minDuration={4000}
+                    onClap={() =>
+                      Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy)
+                    }
+                    onFinish={() => {
+                      splashShownThisLaunch = true;
+                      setSplashDone(true);
+                    }}
                   />
-                  <Stack.Screen
-                    name="(auth)/create-account"
-                    options={{ presentation: "modal" }}
-                  />
-                </Stack>
-              ) : (
-                <View style={styles.startup}>
-                  <LoadingView label="Getting things ready" />
-                </View>
-              )}
-              {!splashDone ? (
-                <SplashScreenView
-                  isReady={appReady}
-                  minDuration={4000}
-                  onClap={() =>
-                    Haptics.impactAsync(Haptics.ImpactFeedbackStyle.Heavy)
-                  }
-                  onFinish={() => {
-                    splashShownThisLaunch = true;
-                    setSplashDone(true);
-                  }}
-                />
-              ) : null}
-            </QueryClientProvider>
-          </SafeAreaProvider>
-        </DialogProvider>
-      </GestureHandlerRootView>
-    </AppErrorBoundary>
+                ) : null}
+              </QueryClientProvider>
+            </SafeAreaProvider>
+          </DialogProvider>
+        </GestureHandlerRootView>
+      </AppErrorBoundary>
+    </ClerkProvider>
   );
 }
 

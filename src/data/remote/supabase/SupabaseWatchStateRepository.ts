@@ -3,11 +3,44 @@ import type { CatalogMedia, MediaEpisode } from '@/domain/models/media';
 import type { CloudWatchStateRepository, InterestedCount, PendingWatchStateChange, WatchPriority } from '@/domain/models/watchState';
 import { isWatchPriority } from '@/features/watchState/priority';
 import { mediaId } from '@/features/catalog/mediaIdentity';
-import { supabase, type Json } from './client';
+import { dataClient, getClerkToken, supabase, type Json } from './client';
 
 function client() {
   if (!supabase) throw new AppError('configuration', 'Cloud sync is not configured on this device.');
   return supabase;
+}
+
+/** User-scoped data access: Clerk-authed when a Clerk session is live, else the Supabase session. */
+async function data() {
+  try {
+    return await dataClient();
+  } catch {
+    throw new AppError('configuration', 'Cloud sync is not configured on this device.');
+  }
+}
+
+/** `sub` claim of a JWT without verifying (RLS remains the real guard server-side). */
+function jwtSubject(token: string): string | null {
+  try {
+    const segment = (token.split('.')[1] ?? '').replace(/-/g, '+').replace(/_/g, '/');
+    const chars = 'ABCDEFGHIJKLMNOPQRSTUVWXYZabcdefghijklmnopqrstuvwxyz0123456789+/';
+    let bits = 0;
+    let bitCount = 0;
+    let json = '';
+    for (const char of `${segment}===`.slice(0, Math.ceil(segment.length / 4) * 4)) {
+      if (char === '=') break;
+      bits = (bits << 6) | chars.indexOf(char);
+      bitCount += 6;
+      if (bitCount >= 8) {
+        bitCount -= 8;
+        json += String.fromCharCode((bits >> bitCount) & 0xff);
+      }
+    }
+    const payload = JSON.parse(json) as { sub?: unknown };
+    return typeof payload.sub === 'string' && payload.sub ? payload.sub : null;
+  } catch {
+    return null;
+  }
 }
 
 function parseArray<T>(value: Json, fallback: T[]): T[] {
@@ -36,13 +69,25 @@ function cloudError(failure: CloudFailure | null | undefined, fallbackMessage: s
 
 export class SupabaseWatchStateRepository implements CloudWatchStateRepository {
   async getAuthenticatedUserId(): Promise<string | undefined> {
+    // Clerk sessions authorize Supabase through third-party auth: verify the
+    // Clerk JWT with the Auth server (it validates third-party issuers), and
+    // fall back to its `sub` claim when verification itself is unreachable —
+    // RLS still enforces access server-side either way.
+    const clerkToken = await getClerkToken();
+    if (clerkToken) {
+      try {
+        const { data, error } = await client().auth.getUser(clerkToken);
+        if (!error && data.user) return data.user.id;
+      } catch { /* fall through to the sub claim */ }
+      return jwtSubject(clerkToken) ?? undefined;
+    }
     const { data, error } = await client().auth.getSession();
     if (error) throw new AppError('authentication', 'Your account session needs to be refreshed. Sign in again to sync.');
     return data.session?.user.id;
   }
 
   async fetch(userId: string): Promise<PendingWatchStateChange[]> {
-    const supabaseClient = client();
+    const supabaseClient = await data();
     const [mediaResult, watchlistResult, movieResult, seriesResult, episodeResult, favoriteResult, ratingResult, interestedResult] = await Promise.all([
       supabaseClient.from('library_media').select('*').eq('user_id', userId),
       supabaseClient.from('watchlist_entries').select('*').eq('user_id', userId),
@@ -112,19 +157,25 @@ export class SupabaseWatchStateRepository implements CloudWatchStateRepository {
   }
 
   async getInterestedCounts(): Promise<InterestedCount[]> {
-    if (!supabase) return [];
-    const { data, error } = await supabase.rpc('get_interested_counts');
-    if (error) return [];
-    return (data ?? []).flatMap((row) => {
-      if (row.provider !== 'tmdb' && row.provider !== 'anilist') return [];
-      if (row.media_type !== 'movie' && row.media_type !== 'series' && row.media_type !== 'anime') return [];
-      return [{ provider: row.provider, mediaType: row.media_type, providerId: row.provider_id, count: Number(row.interested_count) || 0 }];
-    });
+    // Silent like before when unconfigured/offline: counts decorate the UI
+    // but must never break it.
+    try {
+      const db = await data();
+      const { data: rows, error } = await db.rpc('get_interested_counts');
+      if (error) return [];
+      return (rows ?? []).flatMap((row) => {
+        if (row.provider !== 'tmdb' && row.provider !== 'anilist') return [];
+        if (row.media_type !== 'movie' && row.media_type !== 'series' && row.media_type !== 'anime') return [];
+        return [{ provider: row.provider, mediaType: row.media_type, providerId: row.provider_id, count: Number(row.interested_count) || 0 }];
+      });
+    } catch {
+      return [];
+    }
   }
 
   async upsert(userId: string, changes: PendingWatchStateChange[]): Promise<void> {
     if (!changes.length) return;
-    const supabaseClient = client();
+    const supabaseClient = await data();
     const mediaByIdentity = new Map(changes.map(({ media }) => [media.id, media]));
     const mediaRows = [...mediaByIdentity.values()].map((media) => ({
       user_id: userId, provider: media.provider, media_type: media.mediaType, provider_id: media.providerId,

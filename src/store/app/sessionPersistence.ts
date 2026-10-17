@@ -2,11 +2,36 @@ import AsyncStorage from '@react-native-async-storage/async-storage';
 import type { SessionState } from '@/domain/models/session';
 import { useSessionStore } from './sessionStore';
 import { supabase } from '@/data/remote/supabase/client';
+import { isNetworkAuthError } from '@/lib/netError';
 
 const KEY = 'watch-later.session.v1';
 interface PersistedSession {
   session: SessionState;
   onboardingComplete: boolean;
+}
+
+/**
+ * True when the stored Supabase session still belongs to a live account.
+ *
+ * `getSession()` restores whatever token is on disk, including one left behind
+ * by an account that was deleted afterwards — a perfectly valid-looking
+ * session that would sign the user straight back in with no library. The
+ * server is the authority: `getUser()` fails once the auth user is gone.
+ * Offline, the session cannot be disproven, so it is kept.
+ */
+async function isLiveSupabaseSession(client: NonNullable<typeof supabase>): Promise<boolean> {
+  if (!client.auth.getUser) return true;
+  try {
+    const { data, error } = await client.auth.getUser();
+    if (data.user) return true;
+    // A transport failure cannot disprove the session: keep it and let the
+    // next online launch re-check. Only a real auth verdict (the user no
+    // longer resolves) means the account is gone.
+    if (error && isNetworkAuthError(error)) return true;
+    return false;
+  } catch {
+    return true; // offline / unreachable: keep the session usable
+  }
 }
 
 export async function hydrateSession(): Promise<void> {
@@ -17,16 +42,26 @@ export async function hydrateSession(): Promise<void> {
       useSessionStore.getState().setSession(saved.session);
       useSessionStore.getState().setOnboardingComplete(saved.onboardingComplete);
     }
+    // A Clerk session is validated by ClerkProvider itself (the bridge feeds
+    // Supabase on demand): never sweep it as a dead Supabase session.
+    if (saved?.session.mode === 'authenticated' && 'provider' in saved.session && saved.session.provider === 'clerk') return;
     if (supabase) {
       const { data } = await supabase.auth.getSession();
-      if (data.session?.user) {
-        const authenticated = { mode: 'authenticated' as const, userId: data.session.user.id, email: data.session.user.email ?? '' };
+      const storedUser = data.session?.user ?? null;
+      const live = storedUser ? await isLiveSupabaseSession(supabase) : false;
+      if (live && storedUser) {
+        const authenticated = { mode: 'authenticated' as const, userId: storedUser.id, email: storedUser.email ?? '' };
         useSessionStore.getState().setSession(authenticated);
         if (saved) await persistSession(authenticated, saved.onboardingComplete);
-      } else if (saved?.session.mode === 'authenticated') {
-        const guest = { mode: 'guest' as const, userId: `guest-${Date.now()}` };
-        useSessionStore.getState().setSession(guest);
-        await persistSession(guest, saved.onboardingComplete);
+      } else {
+        // A stored session that the server no longer recognises belongs to a
+        // deleted (or revoked) account: sweep it so nothing can re-adopt it.
+        if (storedUser) await supabase.auth.signOut({ scope: 'local' }).catch(() => undefined);
+        if (saved?.session.mode === 'authenticated') {
+          const guest = { mode: 'guest' as const, userId: `guest-${Date.now()}` };
+          useSessionStore.getState().setSession(guest);
+          await persistSession(guest, saved.onboardingComplete);
+        }
       }
     } else if (saved?.session.mode === 'authenticated') {
       const guest = { mode: 'guest' as const, userId: `guest-${Date.now()}` };

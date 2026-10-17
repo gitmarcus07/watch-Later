@@ -1,5 +1,7 @@
-import { SupabaseAuthService, DeviceLinkedError, EXISTING_ACCOUNT_NOTICE, isExistingAccountUser, parseOAuthRedirect, resolveOAuthRedirectUri } from '@/features/auth/SupabaseAuthService';
+import { SupabaseAuthService, DeviceLinkedError, EXISTING_ACCOUNT_NOTICE, LOCAL_LIBRARY_PREP_NOTICE, PENDING_GOOGLE_MODE_TTL_MS, RECENTLY_CREATED_ACCOUNT_TTL_MS, consumePendingGoogleMode, isAuthFlowInFlight, isExistingAccountUser, markAccountCreatedOnDevice, wasAccountCreatedOnDevice, parseOAuthRedirect, resolveOAuthRedirectUri } from '@/features/auth/SupabaseAuthService';
+import { markAccountDeleted } from '@/features/auth/deleteAccount';
 import type { GuestMigrationService } from '@/data/local/repositories/GuestMigrationService';
+import AsyncStorage from '@react-native-async-storage/async-storage';
 
 const user = { id: 'user-123', email: 'viewer@example.test' };
 const session = { user };
@@ -72,11 +74,47 @@ describe('optional Supabase authentication', () => {
     expect(migrationService.migrateToAccount).not.toHaveBeenCalled();
   });
 
-  it('signs out after account-binding refusal without running a sync', async () => {
+  it('keeps the session alive after a local-library bind failure and reports a notice', async () => {
     const client = authClient();
-    const migrationService = migration(true);
-    await expect(new SupabaseAuthService(client, migrationService).signIn('viewer@example.test', 'test-password')).rejects.toThrow('library already bound');
-    expect(client.auth.signOut).toHaveBeenCalledTimes(1);
+    const migrationService = migration(true); // bind fails every attempt
+    const repair = jest.fn().mockResolvedValue(undefined);
+    const service = new SupabaseAuthService(client, migrationService, null, repair);
+    await expect(service.signIn('viewer@example.test', 'test-password')).resolves.toMatchObject({
+      mode: 'authenticated',
+      userId: user.id,
+      notice: LOCAL_LIBRARY_PREP_NOTICE,
+    });
+    // Retried plain, then on a repaired local library, then downgraded —
+    // never signed out, never a raw rejection.
+    expect(migrationService.migrateToAccount).toHaveBeenCalledTimes(3);
+    expect(repair).toHaveBeenCalledTimes(1);
+    expect(client.auth.signOut).not.toHaveBeenCalled();
+  });
+
+  it('recovers when the bind fails once but succeeds on the plain retry', async () => {
+    const client = authClient();
+    let attempts = 0;
+    const migrationService = migration();
+    migrationService.migrateToAccount.mockImplementation(async () => {
+      attempts += 1;
+      if (attempts === 1) throw new Error('database is locked');
+    });
+    const repair = jest.fn().mockResolvedValue(undefined);
+    await expect(new SupabaseAuthService(client, migrationService, null, repair).signIn('viewer@example.test', 'test-password'))
+      .resolves.toEqual({ mode: 'authenticated', userId: user.id, email: user.email });
+    expect(repair).not.toHaveBeenCalled();
+    expect(client.auth.signOut).not.toHaveBeenCalled();
+  });
+
+  it('marks the flow as in flight only while it runs (so the auth listener never double-prompts)', async () => {
+    const seen: boolean[] = [];
+    const migrationService = migration();
+    migrationService.migrateToAccount.mockImplementation(async () => { seen.push(isAuthFlowInFlight()); });
+    const service = new SupabaseAuthService(authClient(), migrationService);
+    expect(isAuthFlowInFlight()).toBe(false);
+    await service.signIn('viewer@example.test', 'test-password');
+    expect(seen).toEqual([true]);
+    expect(isAuthFlowInFlight()).toBe(false);
   });
 
   it('provides a controlled configuration error when account features are not configured', async () => {
@@ -208,6 +246,54 @@ describe('Google sign-in flow', () => {
     const service = new SupabaseAuthService(client, migration(), oauthDeps({ type: 'success', url: '' }));
     await expect(service.signInWithGoogle()).rejects.toThrow('Unable to sign in');
   });
+
+  const createdDaysAgo = new Date(Date.now() - 86_400_000).toISOString();
+  const freshUser = { ...user, created_at: new Date().toISOString() };
+  const googleFlow = (getUser: jest.Mock) => new SupabaseAuthService(
+    oauthClient({ getUser }),
+    migration(),
+    oauthDeps({ type: 'success', url: 'watchlater://auth/callback?code=abc123' }),
+  );
+
+  it('tells the user when Google "create account" resolves to an account that already existed', async () => {
+    const service = googleFlow(jest.fn().mockResolvedValue({ data: { user: { ...user, created_at: createdDaysAgo } } }));
+    await expect(service.signInWithGoogle('sign-up'))
+      .resolves.toMatchObject({ mode: 'authenticated', userId: user.id, notice: EXISTING_ACCOUNT_NOTICE });
+  });
+
+  it('keeps a genuinely fresh Google signup and a plain sign-in notice-free', async () => {
+    await expect(googleFlow(jest.fn().mockResolvedValue({ data: { user: freshUser } })).signInWithGoogle('sign-up'))
+      .resolves.toEqual({ mode: 'authenticated', userId: user.id, email: user.email });
+    await expect(googleFlow(jest.fn().mockResolvedValue({ data: { user: { ...user, created_at: createdDaysAgo } } })).signInWithGoogle('sign-in'))
+      .resolves.toEqual({ mode: 'authenticated', userId: user.id, email: user.email });
+  });
+
+  describe('fast re-sign-in after a fresh signup', () => {
+    beforeEach(() => AsyncStorage.clear());
+
+    it('rolls back a husk minted outside this device', async () => {
+      const client = oauthClient({ getUser: jest.fn().mockResolvedValue({ data: { user: freshUser } }) });
+      const service = new SupabaseAuthService(client, migration(), oauthDeps({ type: 'success', url: 'watchlater://auth/callback?code=abc123' }));
+      await expect(service.signInWithGoogle('sign-in')).rejects.toThrow('Create a new account first');
+      expect(client.auth.signOut).toHaveBeenCalled();
+      expect(await wasAccountCreatedOnDevice(freshUser.id)).toBe(false);
+    });
+
+    it('never rolls back an account this device just created', async () => {
+      await markAccountCreatedOnDevice(freshUser.id);
+      const client = oauthClient({ getUser: jest.fn().mockResolvedValue({ data: { user: freshUser } }) });
+      const service = new SupabaseAuthService(client, migration(), oauthDeps({ type: 'success', url: 'watchlater://auth/callback?code=abc123' }));
+      await expect(service.signInWithGoogle('sign-in')).resolves.toMatchObject({ mode: 'authenticated', userId: user.id });
+      expect(client.auth.signOut).not.toHaveBeenCalled();
+      expect(await wasAccountCreatedOnDevice(freshUser.id)).toBe(true);
+    });
+
+    it('remembers a fresh Google signup on this device', async () => {
+      const service = googleFlow(jest.fn().mockResolvedValue({ data: { user: freshUser } }));
+      await expect(service.signInWithGoogle('sign-up')).resolves.toMatchObject({ mode: 'authenticated', userId: user.id });
+      expect(await wasAccountCreatedOnDevice(freshUser.id)).toBe(true);
+    });
+  });
 });
 
 describe('create account with an email that already exists', () => {
@@ -236,6 +322,12 @@ describe('create account with an email that already exists', () => {
   it('keeps a genuinely fresh signup free of notices', async () => {
     await expect(new SupabaseAuthService(probeFails(), migration()).createAccount('brand-new@example.test', 'test-password'))
       .resolves.toEqual({ mode: 'authenticated', userId: user.id, email: user.email });
+  });
+
+  it('remembers a fresh email signup on this device so a fast re-sign-in cannot roll it back', async () => {
+    await AsyncStorage.clear();
+    await new SupabaseAuthService(probeFails(), migration()).createAccount('brand-new@example.test', 'test-password');
+    expect(await wasAccountCreatedOnDevice(user.id)).toBe(true);
   });
 
   it('maps the newer already-registered error code to a sign-in nudge', async () => {
@@ -323,5 +415,184 @@ describe('signing into a different account on the same device', () => {
     const service = new SupabaseAuthService(authClient(), migrationService, null, repair, async () => { throw new Error('db unreadable'); });
     await expect(service.signIn('b@example.test', 'test-password')).rejects.toThrow('linked to another account');
     expect(repair).not.toHaveBeenCalled();
+  });
+});
+
+describe('offline sign-out', () => {
+  /** signOut returned an error (e.g. network failure during the server revoke). */
+  function failingRevoke(localSession: unknown) {
+    const client = {
+      auth: {
+        ...authClient().auth,
+        signOut: jest.fn().mockResolvedValue({ error: { message: 'Failed to fetch' } }),
+        getSession: jest.fn().mockResolvedValue({ data: { session: localSession } }),
+      },
+    };
+    return client;
+  }
+
+  it('reports success when the failed revoke already left no session on the device', async () => {
+    const client = failingRevoke(null);
+    await expect(new SupabaseAuthService(client, migration()).signOut()).resolves.toBeUndefined();
+    expect(client.auth.getSession).toHaveBeenCalled();
+  });
+
+  it('still reports failure while a session survives the failed revoke', async () => {
+    const client = failingRevoke({ access_token: 'token' });
+    await expect(new SupabaseAuthService(client, migration()).signOut()).rejects.toThrow('Unable to log out');
+  });
+
+  it('still reports failure when the local session state cannot be read', async () => {
+    const client = failingRevoke(null);
+    client.auth.getSession = jest.fn().mockRejectedValue(new Error('storage unreadable'));
+    await expect(new SupabaseAuthService(client, migration()).signOut()).rejects.toThrow('Unable to log out');
+  });
+});
+
+describe('unconfirmed email address', () => {
+  it('maps email_not_confirmed to a confirmation nudge instead of a generic failure', async () => {
+    const client = authClient();
+    client.auth.signInWithPassword.mockResolvedValue({ data: { user: null, session: null }, error: { code: 'email_not_confirmed', message: 'Email not confirmed' } });
+    await expect(new SupabaseAuthService(client, migration()).signIn('viewer@example.test', 'test-password'))
+      .rejects.toThrow('Confirm your email address first');
+  });
+});
+
+describe('Google sign-in mode intent', () => {
+  const MODE_KEY = 'watch-later.google-auth-mode.v1';
+
+  beforeEach(async () => { await AsyncStorage.clear(); });
+
+  it('consumes a fresh stored intent exactly once', async () => {
+    await AsyncStorage.setItem(MODE_KEY, JSON.stringify({ mode: 'sign-in', at: Date.now() }));
+    await expect(consumePendingGoogleMode()).resolves.toBe('sign-in');
+    // Second call: the slot is gone, and no deletion record exists → sign-up.
+    await expect(consumePendingGoogleMode()).resolves.toBe('sign-up');
+    expect(await AsyncStorage.getItem(MODE_KEY)).toBeNull();
+  });
+
+  it('keeps the intent across a cancelled/dismissed browser session (no finally-clear)', async () => {
+    const service = new SupabaseAuthService(oauthClientForMode(), migration(), { redirectUri: 'watchlater://auth/callback', browser: { openAuthSessionAsync: jest.fn().mockResolvedValue({ type: 'dismiss' }) } });
+    await expect(service.signInWithGoogle('sign-in')).rejects.toThrow('cancelled');
+    // The intent written at flow start must survive the dismissal so a
+    // router-delivered callback that lands late still knows the mode.
+    const stored = JSON.parse((await AsyncStorage.getItem(MODE_KEY)) ?? 'null') as { mode?: string; at?: number } | null;
+    expect(stored?.mode).toBe('sign-in');
+    expect(typeof stored?.at).toBe('number');
+  });
+
+  it('ignores a stale intent and falls back to sign-in when a deletion is outstanding', async () => {
+    await AsyncStorage.setItem(MODE_KEY, JSON.stringify({ mode: 'sign-up', at: Date.now() - PENDING_GOOGLE_MODE_TTL_MS - 1000 }));
+    await markAccountDeleted('user-123');
+    await expect(consumePendingGoogleMode()).resolves.toBe('sign-in');
+  });
+
+  it('ignores a stale intent and falls back to sign-up with no deletion record', async () => {
+    await AsyncStorage.setItem(MODE_KEY, JSON.stringify({ mode: 'sign-in', at: Date.now() - PENDING_GOOGLE_MODE_TTL_MS - 1000 }));
+    await expect(consumePendingGoogleMode()).resolves.toBe('sign-up');
+  });
+
+  it('resolves an absent intent from the deletion record (deleted account never auto-signs up)', async () => {
+    await markAccountDeleted('user-123');
+    await expect(consumePendingGoogleMode()).resolves.toBe('sign-in');
+  });
+
+  it('defaults an absent intent to sign-up when nothing was ever deleted', async () => {
+    await expect(consumePendingGoogleMode()).resolves.toBe('sign-up');
+  });
+
+  it('treats a malformed stored intent as absent', async () => {
+    await AsyncStorage.setItem(MODE_KEY, JSON.stringify({ mode: 'something-else', at: Date.now() }));
+    await expect(consumePendingGoogleMode()).resolves.toBe('sign-up');
+    await AsyncStorage.setItem(MODE_KEY, 'not json at all');
+    await expect(consumePendingGoogleMode()).resolves.toBe('sign-up');
+  });
+});
+
+describe('device-created account mark', () => {
+  beforeEach(async () => { await AsyncStorage.clear(); });
+
+  it('honours a fresh mark and rejects a stale one', async () => {
+    await markAccountCreatedOnDevice(user.id);
+    expect(await wasAccountCreatedOnDevice(user.id)).toBe(true);
+
+    await AsyncStorage.setItem('watch-later.recently-created-account.v1', JSON.stringify({ userId: user.id, at: Date.now() - RECENTLY_CREATED_ACCOUNT_TTL_MS - 1000 }));
+    expect(await wasAccountCreatedOnDevice(user.id)).toBe(false);
+  });
+
+  it('never matches another account', async () => {
+    await markAccountCreatedOnDevice(user.id);
+    expect(await wasAccountCreatedOnDevice('someone-else')).toBe(false);
+  });
+
+  it('honours legacy plain-id values from older builds', async () => {
+    await AsyncStorage.setItem('watch-later.recently-created-account.v1', user.id);
+    expect(await wasAccountCreatedOnDevice(user.id)).toBe(true);
+  });
+});
+
+/** OAuth client whose browser immediately dismisses (for intent-persistence tests). */
+function oauthClientForMode() {
+  return {
+    auth: {
+      ...authClient().auth,
+      signInWithOAuth: jest.fn().mockResolvedValue({ data: { url: 'https://accounts.google.test/o/oauth2/auth' }, error: null }),
+      exchangeCodeForSession: jest.fn().mockResolvedValue({ error: null }),
+      getUser: jest.fn().mockResolvedValue({ data: { user } }),
+    },
+  };
+}
+
+describe('Clerk Google sign-in', () => {
+  const clerkId = 'user_clerk_123';
+  const freshMs = Date.now();
+  const oldMs = Date.now() - 86_400_000;
+  const signOut = jest.fn().mockResolvedValue(undefined);
+
+  beforeEach(async () => {
+    await AsyncStorage.clear();
+    signOut.mockClear();
+  });
+
+  function clerkService(failAccountBind = false, repair = jest.fn().mockResolvedValue(undefined)) {
+    return new SupabaseAuthService(authClient(), migration(failAccountBind), null, repair);
+  }
+
+  it('signs a fresh Clerk signup in notice-free and remembers it on this device', async () => {
+    const service = clerkService();
+    await expect(service.signInWithClerk({ userId: clerkId, email: 'viewer@example.test', createdAtMs: freshMs, googleMode: 'sign-up', clerkSignOut: signOut }))
+      .resolves.toEqual({ mode: 'authenticated', userId: clerkId, email: 'viewer@example.test', provider: 'clerk' });
+    expect(signOut).not.toHaveBeenCalled();
+    expect(await wasAccountCreatedOnDevice(clerkId)).toBe(true);
+  });
+
+  it('rolls a fresh husk back on sign-in instead of adopting an empty account', async () => {
+    const service = clerkService();
+    await expect(service.signInWithClerk({ userId: clerkId, email: 'viewer@example.test', createdAtMs: freshMs, googleMode: 'sign-in', clerkSignOut: signOut }))
+      .rejects.toThrow('couldn’t find an account');
+    expect(signOut).toHaveBeenCalledTimes(1);
+    expect(await wasAccountCreatedOnDevice(clerkId)).toBe(false);
+  });
+
+  it('never rolls back an account this device just created', async () => {
+    await markAccountCreatedOnDevice(clerkId);
+    const service = clerkService();
+    await expect(service.signInWithClerk({ userId: clerkId, email: 'viewer@example.test', createdAtMs: freshMs, googleMode: 'sign-in', clerkSignOut: signOut }))
+      .resolves.toMatchObject({ mode: 'authenticated', userId: clerkId, provider: 'clerk' });
+    expect(signOut).not.toHaveBeenCalled();
+  });
+
+  it('tells the user when a Clerk signup resolves to an account that already existed', async () => {
+    const service = clerkService();
+    await expect(service.signInWithClerk({ userId: clerkId, email: 'viewer@example.test', createdAtMs: oldMs, googleMode: 'sign-up', clerkSignOut: signOut }))
+      .resolves.toMatchObject({ mode: 'authenticated', provider: 'clerk', notice: EXISTING_ACCOUNT_NOTICE });
+  });
+
+  it('keeps the session alive with a notice when the local library cannot be prepared', async () => {
+    const client = authClient();
+    const service = new SupabaseAuthService(client, migration(true), null, jest.fn().mockResolvedValue(undefined));
+    await expect(service.signInWithClerk({ userId: clerkId, email: 'viewer@example.test', createdAtMs: freshMs, googleMode: 'sign-up', clerkSignOut: signOut }))
+      .resolves.toMatchObject({ mode: 'authenticated', provider: 'clerk', notice: LOCAL_LIBRARY_PREP_NOTICE });
+    expect(client.auth.signOut).not.toHaveBeenCalled();
   });
 });

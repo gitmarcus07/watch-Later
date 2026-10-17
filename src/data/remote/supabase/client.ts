@@ -60,6 +60,57 @@ export const supabase =
     : null;
 
 /**
+ * Clerk JWT provider for Supabase's third-party auth. Registered by
+ * `ClerkSupabaseBridge` (mounted inside `ClerkProvider`) and cleared on
+ * sign-out. Null while the Clerk session is absent — data callers then fall
+ * back to the Supabase-authenticated singleton above.
+ *
+ * A separate client is required (not `accessToken` on the singleton):
+ * supabase-js disables `supabase.auth.*` on a client configured with
+ * `accessToken`, and this app's email/password, PKCE, sign-out, deletion,
+ * and listener flows all need `auth.*` alive.
+ */
+let clerkTokenProvider: (() => Promise<string | null>) | null = null;
+
+export function setClerkTokenProvider(provider: (() => Promise<string | null>) | null): void {
+  clerkTokenProvider = provider;
+  // The data client below caches nothing auth-related per request (the token
+  // is resolved per call), so swapping the provider is enough — but drop the
+  // client itself on sign-out so no Clerk-authed instance lingers.
+  if (!provider) clerkDataClient = null;
+}
+
+/** Fresh `supabase`-template Clerk JWT, or null outside a Clerk session. */
+export async function getClerkToken(): Promise<string | null> {
+  try {
+    return (await clerkTokenProvider?.()) ?? null;
+  } catch {
+    return null;
+  }
+}
+
+let clerkDataClient: NonNullable<typeof supabase> | null = null;
+
+/**
+ * Client for user-scoped data (RLS) writes/reads. Returns a Clerk-authed
+ * client when a Clerk session is live, else the Supabase-authenticated
+ * singleton. Throws when cloud sync is unconfigured, like before.
+ */
+export async function dataClient(): Promise<NonNullable<typeof supabase>> {
+  const token = await getClerkToken();
+  if (token) {
+    if (!url || !anonKey) throw new Error('Cloud sync is not configured on this device.');
+    clerkDataClient ??= createClient<Database>(url, anonKey, {
+      auth: { persistSession: false, autoRefreshToken: false, detectSessionInUrl: false },
+      accessToken: async () => (await getClerkToken()) ?? '',
+    });
+    return clerkDataClient;
+  }
+  if (!supabase) throw new Error('Cloud sync is not configured on this device.');
+  return supabase;
+}
+
+/**
  * AsyncStorage key prefix supabase-js uses to persist the session, the user,
  * and every PKCE verifier slot — all of which begin
  * `sb-<project-ref>-auth-token`. This client relies on supabase-js's default

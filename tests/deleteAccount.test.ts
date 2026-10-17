@@ -1,5 +1,5 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
-import { deleteAccount, isDeleteConfirmed, signOutAfterAccountDeletion, type DeleteAccountDeps } from '@/features/auth/deleteAccount';
+import { deleteAccount, isDeleteConfirmed, markAccountDeleted, getLastDeletedAccount, clearLastDeletedAccount, signOutAfterAccountDeletion, verifyAuthUserDeleted, type DeleteAccountDeps } from '@/features/auth/deleteAccount';
 
 function deps(overrides: Partial<DeleteAccountDeps> = {}): DeleteAccountDeps {
   return {
@@ -62,6 +62,52 @@ describe('deleteAccount', () => {
     await expect(deleteAccount('user-123', tracking)).resolves.toEqual({ authDeleted: true });
     expect(tracking.resetLocalData).toHaveBeenCalledTimes(1);
     expect(tracking.signOut).toHaveBeenCalledTimes(1);
+  });
+
+  it('records the deletion before any best-effort sweep can fail', async () => {
+    await AsyncStorage.clear();
+    const tracking = deps({ deleteRemoteUserData: jest.fn().mockRejectedValue(new Error('offline')) });
+    await deleteAccount('user-123', tracking);
+    // Even with the sweeps failing, the record exists so the next sign-in
+    // repairs leftovers silently and a lost Google intent resolves as sign-in.
+    expect(await getLastDeletedAccount()).toBe('user-123');
+  });
+});
+
+describe('verifyAuthUserDeleted', () => {
+  const client = (auth: Record<string, unknown>) => ({ auth }) as unknown as NonNullable<typeof import('@/data/remote/supabase/client').supabase>;
+
+  it('blocks deletion when the auth user still exists', async () => {
+    await expect(verifyAuthUserDeleted(client({ getUser: jest.fn().mockResolvedValue({ data: { user: { id: 'user-123' } }, error: null }) })))
+      .resolves.toBe(false);
+  });
+
+  it('confirms deletion when the user no longer resolves server-side', async () => {
+    await expect(verifyAuthUserDeleted(client({ getUser: jest.fn().mockResolvedValue({ data: { user: null }, error: { message: 'User not found' } }) })))
+      .resolves.toBe(true);
+  });
+
+  it('cannot confirm when the check itself failed on the network (offline aborts safely)', async () => {
+    await expect(verifyAuthUserDeleted(client({ getUser: jest.fn().mockResolvedValue({ data: { user: null }, error: { message: 'Failed to fetch' } }) })))
+      .resolves.toBe(false);
+    await expect(verifyAuthUserDeleted(client({ getUser: jest.fn().mockRejectedValue(new Error('Network request failed')) })))
+      .resolves.toBe(false);
+  });
+
+  it('trusts the edge function when there is no way to ask', async () => {
+    await expect(verifyAuthUserDeleted(client({}))).resolves.toBe(true);
+  });
+});
+
+describe('last-deleted-account record', () => {
+  beforeEach(async () => { await AsyncStorage.clear(); });
+
+  it('round-trips and clears the record', async () => {
+    expect(await getLastDeletedAccount()).toBeNull();
+    await markAccountDeleted('user-123');
+    expect(await getLastDeletedAccount()).toBe('user-123');
+    await clearLastDeletedAccount();
+    expect(await getLastDeletedAccount()).toBeNull();
   });
 });
 

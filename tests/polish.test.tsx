@@ -318,4 +318,20 @@ describe('Phase 6 polish', () => {
     const view = await renderAsync(<FadeInView><Text>fading in</Text></FadeInView>);
     expect(collectText(view.toJSON())).toContain('fading in');
   });
+
+  it('auth-driven sync reset only happens for a new sign-in', () => {
+    const rootLayout = readFileSync('app/_layout.tsx', 'utf8');
+    // A token refresh (hourly, and on foreground) re-attests the SAME
+    // account: resetting there wiped a real 'pending'/'error' status from
+    // the profile screen while auto-sync still owed an attempt behind backoff.
+    expect(rootLayout).toContain('if (event === "SIGNED_IN") useSyncStore.getState().reset();');
+  });
+
+  it('sync reset clears the previous account\'s Last synced timestamp', () => {
+    useSyncStore.getState().markSynced();
+    expect(useSyncStore.getState().lastSyncedAt).toBeTruthy();
+    useSyncStore.getState().reset();
+    expect(useSyncStore.getState().lastSyncedAt).toBeUndefined();
+    expect(useSyncStore.getState().status).toBe('idle');
+  });
 });

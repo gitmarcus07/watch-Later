@@ -2,14 +2,18 @@ import { useEffect, useState } from 'react';
 import { ActivityIndicator, KeyboardAvoidingView, Platform, Pressable, StyleSheet, TextInput, View } from 'react-native';
 import Animated, { Easing, FadeInDown, useAnimatedStyle, useSharedValue, withRepeat, withTiming } from 'react-native-reanimated';
 import { router } from 'expo-router';
+import { useClerk, useSSO } from '@clerk/expo';
 import { Ionicons } from '@expo/vector-icons';
 import { AppText } from '@/components/common/AppText';
 import { AppButton } from '@/components/buttons/AppButton';
 import { IconButton } from '@/components/buttons/IconButton';
 import { Screen } from '@/components/common/Screen';
 import { AuthGradientBackground } from '@/components/auth/AuthGradientBackground';
-import { showDialog } from '@/components/feedback/AppDialog';
-import { DeviceLinkedError, NO_GOOGLE_ACCOUNT_MESSAGE, NO_GOOGLE_ACCOUNT_TITLE, SupabaseAuthService, isDeviceLinkedError } from './SupabaseAuthService';
+import { showDialog, showDialogUnlessQueued } from '@/components/feedback/AppDialog';
+import { showFriendlyError } from '@/lib/friendlyError';
+import { DeviceLinkedError, EXISTING_ACCOUNT_NOTICE, NO_GOOGLE_ACCOUNT_MESSAGE, NO_GOOGLE_ACCOUNT_TITLE, SupabaseAuthService, isDeviceLinkedError } from './SupabaseAuthService';
+import { AppError } from '@/domain/errors/AppError';
+import { LOCAL_LIBRARY_PREP_TITLE } from '@/lib/localLibraryNotice';
 import type { SessionState } from '@/domain/models/session';
 import { scheduleAutoSync } from '@/features/sync/autoSync';
 import { persistSession } from '@/store/app/sessionPersistence';
@@ -43,6 +47,8 @@ export function AuthForm({ mode }: { mode: Mode }) {
   const [error, setError] = useState('');
   const setSession = useSessionStore((store) => store.setSession);
   const setOnboardingComplete = useSessionStore((store) => store.setOnboardingComplete);
+  const { startSSOFlow } = useSSO();
+  const clerk = useClerk();
   const isSignUp = mode === 'sign-up';
 
   async function finishAuth(session: SessionState) {
@@ -53,10 +59,18 @@ export function AuthForm({ mode }: { mode: Mode }) {
     useSyncStore.getState().reset();
     if (session.mode === 'authenticated') scheduleAutoSync('auth');
     router.replace('/(tabs)');
-    // An existing email that resolved to a sign-in (instead of a new account)
-    // gets an unmissable confirmation so it never reads as "creating account".
+    // A notice (existing account resolved as sign-in, or a local-library
+    // prep hiccup) always gets an unmissable prompt, never silence.
     if (session.mode === 'authenticated' && session.notice) {
-      void showDialog({ type: 'info', title: 'You already have an account', message: session.notice, primaryAction: { label: 'Continue' } });
+      const isExistingAccount = session.notice.includes(EXISTING_ACCOUNT_NOTICE);
+      // Non-existing-account notices are the local-library prep notice — use
+      // the shared title so a duplicate prompt elsewhere is deduped.
+      void showDialogUnlessQueued({
+        type: isExistingAccount ? 'info' : 'warning',
+        title: isExistingAccount ? 'You already have an account' : LOCAL_LIBRARY_PREP_TITLE,
+        message: session.notice,
+        primaryAction: { label: 'Continue' },
+      });
     }
   }
 
@@ -98,6 +112,11 @@ export function AuthForm({ mode }: { mode: Mode }) {
   }
 
   async function submit() {
+    // Re-entrancy guard: the keyboard's "done" (onSubmitEditing) calls submit
+    // directly and bypasses the disabled button — without this a double-fire
+    // starts a second signIn/signUp while the first is still in flight, and
+    // the first `finally` re-enables the button mid-attempt.
+    if (loading || googleLoading) return;
     const normalizedEmail = email.trim().toLowerCase();
     if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(normalizedEmail)) { setError('Enter a valid email address.'); return; }
     if (!password) { setError('Enter your password.'); return; }
@@ -114,18 +133,21 @@ export function AuthForm({ mode }: { mode: Mode }) {
         try {
           if (await offerLinkedResetAndContinue(cause)) return;
         } catch (retryCause) {
-          setError(retryCause instanceof Error ? retryCause.message : 'Unable to connect to your account. Try again.');
+          await showFriendlyError(retryCause, 'Couldn’t connect to your account');
           return;
         }
       } else if (isDeviceLinkedError(cause)) {
         try {
           if (await offerLinkedResetAndRetry(attempt)) return;
         } catch (retryCause) {
-          setError(retryCause instanceof Error ? retryCause.message : 'Unable to connect to your account. Try again.');
+          await showFriendlyError(retryCause, 'Couldn’t connect to your account');
           return;
         }
       }
-      setError(cause instanceof Error ? cause.message : 'Unable to connect to your account. Try again.');
+      // Every auth failure is a prompt, never just red text under the form:
+      // AppError copy like "Couldn't prepare this account's local library."
+      // is shown verbatim; unknown errors get the sanitized fallback.
+      await showFriendlyError(cause, isSignUp ? 'Couldn’t create your account' : 'Couldn’t sign in');
     } finally { setLoading(false); }
   }
 
@@ -156,14 +178,43 @@ export function AuthForm({ mode }: { mode: Mode }) {
       if (create) router.replace('/(auth)/create-account');
       return;
     }
-    void showDialog({ type: 'error', title: 'Google sign-in failed', message });
+    // AppError copy (provider decline, exchange failure) is shown verbatim;
+    // unknown errors are sanitised by the helper. Never a raw diagnostic.
+    await showFriendlyError(cause, 'Google sign-in failed');
   }
 
   async function continueWithGoogle() {
     if (googleLoading || loading) return;
     setGoogleLoading(true); setError('');
+    // Google now signs in through Clerk (`useSSO` browser flow, works in Expo
+    // Go): the Clerk session authorizes Supabase through third-party auth, so
+    // no Supabase Auth session is created. Email/password below is untouched.
     const attempt = async () => {
-      const session = await authService.signInWithGoogle(isSignUp ? 'sign-up' : 'sign-in');
+      // Self-heal phones carrying a stale Clerk session (signed out of the
+      // app before app sign-out ended both sessions): Clerk rejects a new SSO
+      // flow while signed in, so drop it first. The login screen never holds
+      // a live app session worth keeping.
+      if (clerk.session) await clerk.signOut().catch(() => undefined);
+      const { createdSessionId, setActive, signUp } = await startSSOFlow({ strategy: 'oauth_google' });
+      if (!createdSessionId) {
+        if (signUp?.status === 'missing_requirements') {
+          throw new AppError('authentication', 'Google didn’t share everything needed. Add the missing details and try again.');
+        }
+        throw new AppError('authentication', 'Google sign-in was cancelled.');
+      }
+      await setActive!({ session: createdSessionId });
+      const clerkUser = await readActiveClerkUser();
+      const email = clerkUser.primaryEmailAddress?.emailAddress
+        ?? clerkUser.emailAddresses[0]?.emailAddress
+        ?? '';
+      if (!email) throw new AppError('authentication', 'Google sign-in did not return an account. Please try again.');
+      const session = await authService.signInWithClerk({
+        userId: clerkUser.id,
+        email,
+        createdAtMs: clerkUser.createdAt?.getTime() ?? null,
+        googleMode: isSignUp ? 'sign-up' : 'sign-in',
+        clerkSignOut: () => clerk.signOut(),
+      });
       await finishAuth(session);
     };
     try {
@@ -176,6 +227,8 @@ export function AuthForm({ mode }: { mode: Mode }) {
           await reportGoogleFailure(retryCause);
           return;
         }
+        // Declined: leave no half-signed-in Clerk session behind.
+        await clerk.signOut().catch(() => undefined);
       } else if (isDeviceLinkedError(cause)) {
         try {
           if (await offerLinkedResetAndRetry(attempt)) return;
@@ -186,6 +239,19 @@ export function AuthForm({ mode }: { mode: Mode }) {
       }
       await reportGoogleFailure(cause);
     } finally { setGoogleLoading(false); }
+  }
+
+  /**
+   * The Clerk user right after `setActive` resolves. Polls briefly: state
+   * propagation can lag a frame behind activation.
+   */
+  async function readActiveClerkUser() {
+    for (let i = 0; i < 20; i += 1) {
+      const current = clerk.user;
+      if (current?.id) return current;
+      await new Promise((resolve) => setTimeout(resolve, 100));
+    }
+    throw new AppError('authentication', 'Google sign-in did not complete. Please try again.');
   }
 
   const fieldStyle = (key: string) => [styles.input, focused === key && styles.inputFocused];

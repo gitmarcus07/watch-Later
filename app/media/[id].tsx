@@ -32,6 +32,9 @@ import { queryClient } from '@/lib/query/queryClient';
 import type { CatalogMedia } from '@/domain/models/media';
 import { colors, radius, spacing } from '@/theme';
 
+/** Release-reminder UI is hidden for now; the button and its logic stay. */
+const SHOW_RELEASE_REMINDERS = false;
+
 export default function MediaDetailScreen() {
   const { id, season: seasonParam } = useLocalSearchParams<{ id: string; season?: string }>();
   const router = useRouter();
@@ -246,7 +249,7 @@ export default function MediaDetailScreen() {
           ))}
         </View>
       ) : null}
-      {upcoming ? <><View style={styles.messageCard}><Ionicons name="calendar-outline" size={19} color={colors.accent} /><AppText variant="bodySmall" muted style={styles.messageText}>Releases{releaseLabel ? ` ${releaseLabel}` : ' soon'} — save it to your Watchlist, then mark it watched after release.</AppText></View><NotifyMeButton media={media} /></> : null}
+      {upcoming ? <><View style={styles.messageCard}><Ionicons name="calendar-outline" size={19} color={colors.accent} /><AppText variant="bodySmall" muted style={styles.messageText}>Releases{releaseLabel ? ` ${releaseLabel}` : ' soon'} — save it to your Watchlist, then mark it watched after release.</AppText></View>{SHOW_RELEASE_REMINDERS ? <NotifyMeButton media={media} /> : null}</> : null}
       <DetailActions
         primaryLabel={primaryLabel}
         primaryIcon={primaryIcon}

@@ -1,9 +1,12 @@
 // Supabase Edge Function: delete-account.
 // @ts-nocheck — Deno runtime: checked by `supabase functions deploy`, not tsc.
 //
-// Deletes the calling auth user (service-role). Every user table references
-// auth.users(id) ON DELETE CASCADE, so profiles, library rows, watchlist,
-// watches, favorites, ratings, and interest marks all disappear with it.
+// Deletes the calling user's server data and auth user (service-role).
+// Every user row is deleted explicitly first: Supabase-auth users also get
+// ON DELETE CASCADE coverage, but third-party (Clerk) identities have no
+// auth.users row, so explicit deletes are the only path that removes their
+// library. The auth-user removal tolerates a positively-confirmed absence
+// (third-party case) and fails safe otherwise.
 //
 // Deploy with:
 //   supabase functions deploy delete-account
@@ -46,8 +49,40 @@ serve(async (req) => {
       return new Response(JSON.stringify({ error: 'Invalid session.' }), { status: 401, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
     }
     const admin = createClient(supabaseUrl, serviceKey);
-    const { error: deleteError } = await admin.auth.admin.deleteUser(userId);
-    if (deleteError) throw deleteError;
+    // Remove every row owned by the caller explicitly. Supabase-auth users
+    // get this via ON DELETE CASCADE as well, but third-party (Clerk)
+    // identities have no auth.users row — without explicit deletes their
+    // library would orphan.
+    const userTables: [string, string][] = [
+      ['episode_watches', 'user_id'],
+      ['movie_watches', 'user_id'],
+      ['tracked_series', 'user_id'],
+      ['watchlist_entries', 'user_id'],
+      ['favorite_entries', 'user_id'],
+      ['user_ratings', 'user_id'],
+      ['interested_marks', 'user_id'],
+      ['library_media', 'user_id'],
+      ['profiles', 'id'],
+    ];
+    for (const [table, key] of userTables) {
+      const { error: rowError } = await (admin as unknown as {
+        from(table: string): { delete(): { eq(column: string, value: string): Promise<{ error: { message?: string } | null }> } };
+      }).from(table).delete().eq(key, userId);
+      if (rowError) throw rowError;
+    }
+    // Supabase-auth users still need their auth user removed (cascades
+    // anything FK-bound). Third-party identities have no auth.users row, so
+    // a positively-confirmed absence is success, not failure. Anything
+    // unverifiable fails safe: the caller must abort rather than wipe local
+    // data over a surviving sign-in.
+    try {
+      const { error: deleteError } = await admin.auth.admin.deleteUser(userId);
+      if (deleteError) throw deleteError;
+    } catch (cause) {
+      const lookup = await admin.auth.admin.getUserById(userId).catch(() => null);
+      const confirmedGone = !!lookup && !lookup.error && !lookup.data?.user;
+      if (!confirmedGone) throw cause;
+    }
     return new Response(JSON.stringify({ deleted: true }), { status: 200, headers: { ...corsHeaders, 'Content-Type': 'application/json' } });
   } catch (cause) {
     const message = cause instanceof Error ? cause.message : 'Deletion failed.';

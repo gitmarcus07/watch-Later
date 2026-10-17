@@ -1,5 +1,7 @@
 import NetInfo from '@react-native-community/netinfo';
 import { useSessionStore } from '@/store/app/sessionStore';
+import { showFriendlyError } from '@/lib/friendlyError';
+import { isLocalLibraryPrepFailure, LOCAL_LIBRARY_PREP_NOTICE, LOCAL_LIBRARY_PREP_TITLE } from '@/lib/localLibraryNotice';
 import { syncService } from './SyncService';
 
 export type AutoSyncReason = 'mutation' | 'auth' | 'startup' | 'foreground' | 'connectivity';
@@ -93,10 +95,19 @@ export class AutoSyncScheduler {
       if (session.mode !== 'authenticated' || !session.userId) return;
       await this.deps.sync(session.userId);
       this.consecutiveFailures = 0;
-    } catch {
+    } catch (cause) {
       this.consecutiveFailures += 1;
       // Automatic sync must never break the app; SyncService already records
       // retryable status and the durable queue remains intact for later triggers.
+      //
+      // One exception: "Couldn't prepare this account's local library." is a
+      // prompt-worthy failure — the background trigger is the only surface it
+      // can reach (the sync status line alone reads as a transient hiccup).
+      if (isLocalLibraryPrepFailure(cause)) {
+        // Same title + copy as the auth screen's notice dialog, so
+        // showFriendlyError collapses any overlap into ONE prompt.
+        void showFriendlyError(cause, LOCAL_LIBRARY_PREP_TITLE, { message: LOCAL_LIBRARY_PREP_NOTICE });
+      }
     }
   }
 }

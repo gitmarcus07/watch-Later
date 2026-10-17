@@ -5,6 +5,8 @@ import { useSyncStore } from '@/store/app/syncStore';
 import { watchStateSyncRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
 import { cloudWatchStateRepository } from '@/data/remote/supabase/SupabaseWatchStateRepository';
 import { queryClient } from '@/lib/query/queryClient';
+import { showFriendlyError } from '@/lib/friendlyError';
+import { isLocalLibraryPrepFailure, LOCAL_LIBRARY_PREP_NOTICE, LOCAL_LIBRARY_PREP_TITLE } from '@/lib/localLibraryNotice';
 
 function identity(change: PendingWatchStateChange): string {
   return `${change.entityType}:${change.entityKey}`;
@@ -34,7 +36,17 @@ export class SyncService {
       this.activeSync = undefined;
       const retryUser = this.rerunForUser;
       this.rerunForUser = undefined;
-      if (retryUser) void this.sync(retryUser).catch(() => undefined);
+      if (retryUser) {
+        void this.sync(retryUser).catch((cause: unknown) => {
+          // The overlapping caller already got its own result, so this rerun's
+          // failure has no awaiter — "Couldn't prepare this account's local
+          // library." would never reach a prompt. Same title + copy as the
+          // other surfaces, so showFriendlyError collapses any overlap.
+          if (isLocalLibraryPrepFailure(cause)) {
+            void showFriendlyError(cause, LOCAL_LIBRARY_PREP_TITLE, { message: LOCAL_LIBRARY_PREP_NOTICE });
+          }
+        });
+      }
     });
     return this.activeSync;
   }

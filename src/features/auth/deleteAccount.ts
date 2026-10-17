@@ -1,10 +1,11 @@
 import AsyncStorage from '@react-native-async-storage/async-storage';
 import { AppError } from '@/domain/errors/AppError';
-import { supabase, supabaseAuthStoragePrefix } from '@/data/remote/supabase/client';
+import { getClerkToken, supabase, supabaseAuthStoragePrefix } from '@/data/remote/supabase/client';
 import { clearDeviceLibrary, getDatabase } from '@/data/local/database/database';
 import { Notifications } from '@/lib/notifications';
 import { queryClient } from '@/lib/query/queryClient';
 import { logger } from '@/lib/logger';
+import { isNetworkAuthError } from '@/lib/netError';
 
 /**
  * Delete-account (GitHub-style): the user types their account email to
@@ -79,9 +80,9 @@ async function deleteRemoteUserData(userId: string): Promise<void> {
 /**
  * Removes the auth user itself so the email can't sign back into a husk.
  * Requires the `delete-account` edge function (service-role) to be deployed.
- * Returns false when it cannot run — no session to authenticate with, or the
- * function errors — and the caller aborts the whole deletion instead of
- * wiping data while the sign-in survives.
+ * Returns false when it cannot run — no session to authenticate with, the
+ * function errors, or the user still exists afterwards — and the caller aborts
+ * the whole deletion instead of wiping data while the sign-in survives.
  */
 async function deleteAuthUser(): Promise<boolean> {
   if (!supabase) return false;
@@ -92,6 +93,9 @@ async function deleteAuthUser(): Promise<boolean> {
     // ourselves and force a refresh when the stored session has expired.
     let token = (await supabase.auth.getSession()).data.session?.access_token ?? null;
     if (!token) token = (await supabase.auth.refreshSession()).data.session?.access_token ?? null;
+    // Clerk sessions have no Supabase session: the Clerk JWT (third-party
+    // auth) authenticates the edge function instead.
+    if (!token) token = await getClerkToken();
     if (!token) {
       logger.error('Account deletion needs a valid Supabase session; none available.');
       return false;
@@ -100,10 +104,36 @@ async function deleteAuthUser(): Promise<boolean> {
       headers: { Authorization: `Bearer ${token}` },
     });
     if (error) throw error;
-    return true;
+    // A 2xx from the function is not enough: a mis-deployed or partially
+    // deployed version can report success without removing the user, and the
+    // account then signs straight back in on the next Google flow. Confirm
+    // the auth user is actually gone before destroying anything locally.
+    return await verifyAuthUserDeleted(supabase);
   } catch (cause) {
     logger.error('Auth user deletion failed', cause);
     return false;
+  }
+}
+
+/**
+ * Asks the auth server whether the user still exists. Uses the stored access
+ * token directly: after the auth user is deleted, `getUser()` returns an
+ * error (the subject no longer resolves), which counts as deleted. Only an
+ * explicit surviving user — or a request that could not be verified at all
+ * (offline) — blocks the deletion, so the caller aborts safely: a retried
+ * deletion is cheap; wiping local data over an unconfirmed deletion is not.
+ * A deletion that really succeeded but failed verification self-heals on the
+ * next launch, when hydrateSession sweeps the dead session.
+ */
+export async function verifyAuthUserDeleted(client: typeof supabase): Promise<boolean> {
+  if (!client?.auth?.getUser) return true; // no way to ask; trust the function's success
+  try {
+    const { data, error } = await client.auth.getUser();
+    if (data.user) return false; // still there — abort
+    if (error && isNetworkAuthError(error)) return false; // could not verify
+    return true; // user no longer resolvable server-side
+  } catch {
+    return false; // could not verify — abort and let the user retry
   }
 }
 
@@ -178,15 +208,18 @@ export async function deleteAccount(userId: string, deps: DeleteAccountDeps = de
   // The cascade already removed the server rows; this only sweeps anything
   // without a foreign key. Everything below is best-effort: the account is
   // gone, so a hiccup here must not be reported as a failed deletion.
+  //
+  // Remember the deletion FIRST, before any best-effort local step: even if
+  // the app is killed mid-wipe, the flag lets the next sign-up recognise a
+  // stale device binding as deletion leftovers and repair it silently, and it
+  // lets a lost Google intent resolve as sign-in instead of auto-creating a
+  // fresh husk for the deleted email.
+  await markAccountDeleted(userId);
   await deps.deleteRemoteUserData(userId).catch((cause) => logger.warn('Post-deletion row sweep failed', cause));
   // Drop cached queries first so nothing reopens the database mid-reset.
   await deps.clearCaches().catch((cause) => logger.warn('Cache clear failed', cause));
   await deps.resetLocalData().catch((cause) => logger.warn('Local database reset failed', cause));
   await deps.cancelLocalNotifications().catch(() => undefined);
   await deps.signOut().catch((cause) => logger.warn('Sign-out after deletion failed', cause));
-  // The server account is gone from here on, even if a local step above
-  // hiccuped — remember it so the next sign-up can recognise a stale device
-  // binding as deletion leftovers and repair it without bothering the user.
-  await markAccountDeleted(userId);
   return { authDeleted };
 }

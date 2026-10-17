@@ -5,13 +5,17 @@ import type { CloudWatchStateRepository, PendingWatchStateChange, WatchStateSync
 import { mapTmdbMovie, mapTmdbTv } from '@/data/remote/tmdb/mappers';
 import { runMigrations } from '@/data/local/database/migrations';
 import { SqliteWatchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
-import { SyncService } from '@/features/sync/SyncService';
+import { SyncService, syncService } from '@/features/sync/SyncService';
 import { createSqliteTestAdapter } from './sqliteTestAdapter';
 import { useAppearanceStore } from '@/store/app/appearanceStore';
 import { useNotificationStore } from '@/store/app/notificationStore';
+import { useSessionStore } from '@/store/app/sessionStore';
+import { useSyncStore } from '@/store/app/syncStore';
+import { useDialogStore } from '@/components/feedback/AppDialog';
 import NotificationsScreen from '../app/settings/notifications';
 import AboutScreen from '../app/about';
 import PrivacyScreen from '../app/privacy';
+import MoreScreen from '../app/(tabs)/more';
 
 (globalThis as Record<string, unknown>).IS_REACT_ACT_ENVIRONMENT = true;
 
@@ -34,6 +38,22 @@ jest.mock('expo-router', () => ({
 }));
 
 jest.mock('expo-constants', () => ({ __esModule: true, default: { expoConfig: { version: '1.0.0' } } }));
+
+// MoreScreen signs out of Clerk alongside Supabase; no provider exists under test.
+jest.mock('@clerk/expo', () => ({
+  useClerk: () => ({ signOut: jest.fn().mockResolvedValue(undefined), user: null }),
+  useSSO: () => ({ startSSOFlow: jest.fn() }),
+  useAuth: () => ({ getToken: jest.fn().mockResolvedValue(null), isSignedIn: false }),
+}));
+
+// Backup file flows are exercised in repository tests; UI tests never touch them.
+jest.mock('expo-file-system/legacy', () => ({
+  cacheDirectory: 'file:///cache/',
+  writeAsStringAsync: jest.fn().mockResolvedValue(undefined),
+  readAsStringAsync: jest.fn().mockResolvedValue('{}'),
+}));
+jest.mock('expo-sharing', () => ({ isAvailableAsync: jest.fn().mockResolvedValue(false), shareAsync: jest.fn().mockResolvedValue(undefined) }));
+jest.mock('expo-document-picker', () => ({ getDocumentAsync: jest.fn().mockResolvedValue({ canceled: true }) }));
 
 function movie(id: number) {
   return mapTmdbMovie({ id, title: `Film ${id}`, overview: 'Story', poster_path: '/p.jpg', genres: [] });
@@ -248,5 +268,32 @@ describe('more menu and static screens', () => {
       expect(renderer.toJSON()).toBeTruthy();
       renderer.unmount();
     }
+  });
+
+  it('sync now only claims "up to date" when the sync actually completed', async () => {
+    useSessionStore.setState({ session: { mode: 'authenticated', userId: 'user-123', email: 'viewer@example.test' } });
+    useSyncStore.setState({ status: 'idle', message: undefined, lastSyncedAt: undefined });
+    useDialogStore.setState({ toast: null });
+    const sync = jest.spyOn(syncService, 'sync').mockResolvedValue({ uploaded: 0, downloaded: 0, status: 'pending' });
+
+    let renderer!: ReturnType<typeof create>;
+    await act(async () => { renderer = create(<MoreScreen />); });
+    const press = (label: string) => renderer.root
+      .findAll((node) => typeof node.props?.onPress === 'function' && node.props?.accessibilityLabel === label)[0]
+      .props.onPress();
+
+    // A pending result still owes work — it must not claim completion.
+    await act(async () => { press('Sync now'); });
+    expect(useDialogStore.getState().toast?.message).toMatch(/still waiting/);
+    expect(useDialogStore.getState().toast?.message).not.toMatch(/up to date/);
+
+    useDialogStore.setState({ toast: null });
+    sync.mockResolvedValue({ uploaded: 0, downloaded: 0, status: 'synced' });
+    await act(async () => { press('Sync now'); });
+    expect(useDialogStore.getState().toast?.message).toBe('Your library is up to date');
+
+    sync.mockRestore();
+    useDialogStore.setState({ toast: null });
+    await act(async () => { renderer.unmount(); });
   });
 });

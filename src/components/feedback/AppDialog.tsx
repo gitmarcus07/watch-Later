@@ -124,6 +124,19 @@ export function showDialog(options: DialogOptions): Promise<boolean> {
   });
 }
 
+/**
+ * Shows the dialog unless an identical one (same title + message) is already
+ * waiting. Several triggers — manual sync, auto-sync, the auth listener, the
+ * auth screen — can fail with the same error in the same tick; stacking two
+ * copies of the same prompt reads as a bug.
+ */
+export function showDialogUnlessQueued(options: DialogOptions): Promise<boolean> {
+  const message = options.message ?? '';
+  const duplicate = useDialogStore.getState().queue.some((request) => request.title === options.title && request.message === message);
+  if (duplicate) return Promise.resolve(false);
+  return showDialog(options);
+}
+
 /** Shows a small non-blocking toast that dismisses itself. */
 export function showToast(message: string, type: DialogType = 'info', options?: ToastOptions): void {
   useDialogStore.getState().notify(message, type, options);
