@@ -15,6 +15,15 @@ import { SEED } from './franchise-seed.mjs';
 const here = path.dirname(fileURLToPath(import.meta.url));
 const root = path.resolve(here, '..');
 const outFile = path.join(root, 'src', 'data', 'remote', 'franchises', 'catalog.generated.ts');
+// Successful lookups are memoised so re-running after a seed edit only pays
+// for the titles that changed (a full build is 1000+ lookups).
+const cacheFile = path.join(root, 'Temp', 'franchise-resolve-cache.json');
+let resolveCache = {};
+try {
+  resolveCache = JSON.parse(readFileSync(cacheFile, 'utf8'));
+} catch {
+  resolveCache = {};
+}
 
 const envText = readFileSync(path.join(root, '.env'), 'utf8');
 const apiKey = /EXPO_PUBLIC_TMDB_API_KEY\s*=\s*(.+)/.exec(envText)?.[1]?.trim();
@@ -51,14 +60,23 @@ function similarity(a, b) {
 
 function parseItem(raw) {
   const kind = raw.startsWith('tv:') ? 'series' : 'movie';
-  let title = raw.replace(/^tv:/, '');
+  let rest = raw.replace(/^tv:/, '');
+  // Optional `tmdb:<id> ` pins an explicit TMDb id when title search would be
+  // ambiguous (e.g. films TMDb lists under a different release title).
+  let pinnedId;
+  const pin = /^tmdb:(\d+)\s+/.exec(rest);
+  if (pin) {
+    pinnedId = pin[1];
+    rest = rest.slice(pin[0].length);
+  }
+  let title = rest;
   let year;
   const match = /^(.*)\s\((\d{4})\)$/.exec(title);
   if (match) {
     title = match[1];
     year = Number(match[2]);
   }
-  return { kind, title, year };
+  return { kind, title, year, pinnedId };
 }
 
 function slugify(value) {
@@ -69,7 +87,16 @@ function slugify(value) {
     .replace(/^-+|-+$/g, '');
 }
 
+/** ~3.5 lookups/second — just under the documented TMDb v3 rate limit. */
+const REQUEST_SPACING_MS = 280;
+let nextSlot = 0;
+
 async function api(pathname, params, attempt = 0) {
+  // TMDb's v3 limit is 40 requests / 10 s. A global token spacing keeps the
+  // whole build (1000+ lookups) under it instead of thrashing on 429s.
+  const wait = Math.max(0, nextSlot - Date.now());
+  nextSlot = Math.max(nextSlot, Date.now()) + REQUEST_SPACING_MS;
+  if (wait) await new Promise((resolve) => setTimeout(resolve, wait));
   const url = new URL(`${base}/${pathname}`);
   for (const [key, value] of Object.entries(params)) url.searchParams.set(key, String(value));
   url.searchParams.set('api_key', apiKey);
@@ -90,7 +117,29 @@ async function api(pathname, params, attempt = 0) {
 }
 
 async function resolveItem(raw) {
-  const { kind, title, year } = parseItem(raw);
+  if (resolveCache[raw]?.ok) return resolveCache[raw];
+  const { kind, title, year, pinnedId } = parseItem(raw);
+  if (pinnedId) {
+    const result = await api(kind === 'series' ? `tv/${pinnedId}` : `movie/${pinnedId}`, {});
+    const date = result.first_air_date ?? result.release_date ?? '';
+    const outcome = {
+      ok: true,
+      item: {
+        provider: 'tmdb',
+        mediaType: kind,
+        providerId: String(result.id),
+        // Hand-curated display name wins: pinned ids are used precisely where
+        // TMDb's primary title differs from the well-known one.
+        title,
+        year: date ? Number(date.slice(0, 4)) : year,
+        releaseDate: date || undefined,
+        posterPath: result.poster_path ?? null,
+        backdropPath: result.backdrop_path ?? null,
+      },
+    };
+    resolveCache[raw] = outcome;
+    return outcome;
+  }
   const endpoint = kind === 'series' ? 'search/tv' : 'search/movie';
   const data = await api(endpoint, { query: title, include_adult: 'false' });
   const results = Array.isArray(data.results) ? data.results : [];
@@ -114,7 +163,7 @@ async function resolveItem(raw) {
   if (!best || best.score < 40) return { ok: false, title, year, kind };
   const { result, name } = best;
   const date = result.release_date ?? result.first_air_date ?? '';
-  return {
+  const outcome = {
     ok: true,
     item: {
       provider: 'tmdb',
@@ -127,6 +176,8 @@ async function resolveItem(raw) {
       backdropPath: result.backdrop_path ?? null,
     },
   };
+  resolveCache[raw] = outcome;
+  return outcome;
 }
 
 async function pool(jobs, size, worker) {
@@ -205,6 +256,12 @@ ${lines.join('\n')}
 
 mkdirSync(path.dirname(outFile), { recursive: true });
 writeFileSync(outFile, output, 'utf8');
+try {
+  mkdirSync(path.dirname(cacheFile), { recursive: true });
+  writeFileSync(cacheFile, JSON.stringify(resolveCache, null, 2), 'utf8');
+} catch (error) {
+  console.warn(`cache not written: ${String(error?.message ?? error)}`);
+}
 
 console.log(`\n${franchises.length} franchises, ${totalItems} items -> ${path.relative(root, outFile)}`);
 if (unresolved.length) {

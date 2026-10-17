@@ -96,7 +96,7 @@ describe('franchise catalog integrity', () => {
   it('recent entries are complete and correctly attributed', () => {
     // MCU runs through the newest releases, in date order.
     const mcu = franchiseBySlug('mcu')!;
-    expect(mcu.items[mcu.items.length - 1]).toMatchObject({ title: 'Spider-Man: Brand New Day', year: 2026 });
+    expect(mcu.items[mcu.items.length - 1]).toMatchObject({ title: 'Avengers: Secret Wars', year: 2027 });
     expect(mcu.items.map((item) => item.title)).toContain('The Fantastic 4: First Steps');
     // The DCU collection carries Peacemaker and never the CW Supergirl series
     // (a resolver regression once mapped "Supergirl (2026)" onto the 2015 show).

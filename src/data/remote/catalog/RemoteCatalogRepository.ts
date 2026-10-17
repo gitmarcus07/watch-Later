@@ -214,6 +214,16 @@ export function isUpcomingMedia(media: CatalogMedia, today = new Date()): boolea
   return status === 'announced' || status === 'planned' || status === 'in production' || status === 'post production' || status === 'pilot' || status === 'upcoming' || status === 'rumored' || status === 'not yet released';
 }
 
+/**
+ * Browse and genre shelves are "what's out now" lists — pre-release titles
+ * belong on the Upcoming screen only. Providers rank unreleased titles by
+ * hype, so every discovery page drops them here before it leaves the
+ * repository (the same rule `getTopRated` applies).
+ */
+export function releasedOnly(items: readonly CatalogMedia[]): CatalogMedia[] {
+  return items.filter((item) => !isUpcomingMedia(item));
+}
+
 function orderUpcomingByDate(items: readonly CatalogMedia[], limit = 20): CatalogMedia[] {
   const seen = new Set<string>();
   return [...items]
@@ -782,7 +792,7 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
       animeItems,
     ];
     return {
-      items: interleaveRanked(groups, size * 2),
+      items: releasedOnly(interleaveRanked(groups, size * 2)),
       page: safePage,
       totalPages: RemoteCatalogRepository.maxPages(Math.max(movies.total_pages ?? 1, series.total_pages ?? 1)),
     };
@@ -799,10 +809,10 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
     ]);
     const size = 20;
     return {
-      items: interleaveRanked([
+      items: releasedOnly(interleaveRanked([
         (hollywood.results ?? []).slice(0, size).map(mapTmdbMovie),
         (bollywood.results ?? []).slice(0, size).map(mapTmdbMovie),
-      ], size * 2),
+      ], size * 2)),
       page: safePage,
       totalPages: RemoteCatalogRepository.maxPages(Math.max(hollywood.total_pages ?? 1, bollywood.total_pages ?? 1)),
     };
@@ -819,10 +829,10 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
     ]);
     const size = 20;
     return {
-      items: interleaveRanked([
+      items: releasedOnly(interleaveRanked([
         (hollywood.results ?? []).slice(0, size).map(mapTmdbTv),
         (bollywood.results ?? []).slice(0, size).map(mapTmdbTv),
-      ], size * 2),
+      ], size * 2)),
       page: safePage,
       totalPages: RemoteCatalogRepository.maxPages(Math.max(hollywood.total_pages ?? 1, bollywood.total_pages ?? 1)),
     };
@@ -837,10 +847,10 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
     ]);
     const size = 20;
     return {
-      items: interleaveRanked([
+      items: releasedOnly(interleaveRanked([
         (movies.results ?? []).slice(0, size).map(mapTmdbMovie),
         (series.results ?? []).slice(0, size).map(mapTmdbTv),
-      ], size * 2),
+      ], size * 2)),
       page: safePage,
       totalPages: RemoteCatalogRepository.maxPages(Math.max(movies.total_pages ?? 1, series.total_pages ?? 1)),
     };
@@ -862,10 +872,10 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
     ]);
     const size = 20;
     return {
-      items: interleaveRanked([
+      items: releasedOnly(interleaveRanked([
         (movies.results ?? []).slice(0, size).map(mapTmdbMovie),
         (series.results ?? []).slice(0, size).map(mapTmdbTv),
-      ], size * 2),
+      ], size * 2)),
       page: safePage,
       totalPages: RemoteCatalogRepository.maxPages(Math.max(movies.total_pages ?? 1, series.total_pages ?? 1)),
     };
@@ -878,7 +888,7 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
     // and the same source as the anime detail screen.
     const response = await anilistClient.popularAnime(safePage, RemoteCatalogRepository.TVDB_PAGE_SIZE, signal);
     return {
-      items: response.media.map(mapAniListAnime),
+      items: releasedOnly(response.media.map(mapAniListAnime)),
       page: safePage,
       totalPages: response.lastPage ?? (response.hasNextPage ? safePage + 1 : safePage),
     };
@@ -1026,7 +1036,7 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
         ? primaryFirst(response.media, 40, (dto) => dto.genres?.[0] === mapped)
         : response.media;
       return {
-        items: media.map(mapAniListAnime),
+        items: releasedOnly(media.map(mapAniListAnime)),
         page: safePage,
         totalPages: response.lastPage ?? (response.hasNextPage ? safePage + 1 : safePage),
       };
@@ -1096,7 +1106,7 @@ export class RemoteCatalogRepository implements CatalogRepositoryContract {
     }
     if (!groups.length) throw new CatalogError('tmdb', 'network');
     return {
-      items: interleaveRanked(groups, size * 2),
+      items: releasedOnly(interleaveRanked(groups, size * 2)),
       page: safePage,
       totalPages: RemoteCatalogRepository.maxPages(totals.length ? Math.max(...totals) : 1),
     };

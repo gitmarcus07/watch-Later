@@ -10,6 +10,7 @@ import { CatalogError } from '@/domain/errors/CatalogError';
 import type { CatalogMedia, CatalogSeason, MediaEpisode, SeasonSummary } from '@/domain/models/media';
 import type { SeriesProgress } from '@/domain/models/watchState';
 import { fetchCatalogSeason, useCatalogSeason } from '@/features/catalog/hooks';
+import { isUpcoming } from '@/features/catalog/upcoming';
 import { useAnimeWatchedCount, useCachedSeason, useSeriesTrackingStatus, useStoreSeason, useToggleEpisode, useToggleSeason } from '@/features/watchState/hooks';
 import { watchStateRepository } from '@/data/local/repositories/SqliteWatchStateRepository';
 import { markUpToHere } from '@/features/watchState/status';
@@ -19,10 +20,11 @@ import { queryClient } from '@/lib/query/queryClient';
 import { scheduleAutoSync } from '@/features/sync/autoSync';
 import { colors, radius, spacing } from '@/theme';
 
-function SeasonCard({ media, summary, expanded, onToggleExpand, onSetProgress, onUpToHere }: {
+function SeasonCard({ media, summary, expanded, upcoming, onToggleExpand, onSetProgress, onUpToHere }: {
   media: CatalogMedia;
   summary: SeasonSummary;
   expanded: boolean;
+  upcoming: boolean;
   onToggleExpand: () => void;
   onSetProgress: (seasonNumber: number) => void;
   onUpToHere: (episode: MediaEpisode) => void;
@@ -134,6 +136,9 @@ function SeasonCard({ media, summary, expanded, onToggleExpand, onSetProgress, o
           </View>
           <Ionicons name={expanded ? 'chevron-up' : 'chevron-down'} size={18} color={colors.textSecondary} />
         </Pressable>
+        {/* An unreleased title has nothing to tick yet: the "mark season
+            watched" box only appears once the season can actually be seen. */}
+        {upcoming ? <View style={styles.seasonToggle} accessibilityLabel={`${summary.name} has not released yet`}><Ionicons name="calendar-outline" size={21} color={colors.textMuted} /></View> : (
         <Pressable
           accessibilityRole="checkbox"
           accessibilityLabel={`Mark ${summary.name} ${allWatched ? 'unwatched' : 'watched'}`}
@@ -147,13 +152,14 @@ function SeasonCard({ media, summary, expanded, onToggleExpand, onSetProgress, o
             <Ionicons name={allWatched ? 'checkmark-circle' : 'ellipse-outline'} size={24} color={allWatched ? colors.success : colors.textMuted} />
           )}
         </Pressable>
+        )}
       </View>
       {expanded ? (
         seasonQuery.isLoading && !localSeasonQuery.data ? <View style={styles.cardBody}><EpisodeListSkeleton rows={Math.min(Math.max(summary.episodeCount ?? 4, 2), 6)} /></View>
           : seasonQuery.isError && !localSeasonQuery.data ? <View style={styles.cardBody}><ErrorView message={seasonQuery.error instanceof CatalogError ? seasonQuery.error.userMessage : 'Could not load this season.'} onRetry={() => void seasonQuery.refetch()} /></View>
           : season?.episodes.length ? (
             <View style={styles.cardBody}>
-              {season.episodes.length > 1 ? <Pressable accessibilityRole="button" accessibilityLabel={`Set progress in ${summary.name}`} onPress={() => onSetProgress(summary.seasonNumber)}><AppText variant="label" style={styles.link}>I am on…</AppText></Pressable> : null}
+              {season.episodes.length > 1 && !upcoming ? <Pressable accessibilityRole="button" accessibilityLabel={`Set progress in ${summary.name}`} onPress={() => onSetProgress(summary.seasonNumber)}><AppText variant="label" style={styles.link}>I am on…</AppText></Pressable> : null}
               <EpisodeList episodes={season.episodes} watchedIds={episodeMutation.watchedIds} disabled={busy} onToggleEpisode={(episode, watched) => { triggerLightHaptic(); episodeMutation.toggle({ episode, watched }); }} onUpToHere={onUpToHere} />
             </View>
           ) : <View style={styles.cardBody}><EmptyState icon="list-outline" title="No episodes listed" message="This season does not have episode metadata available." /></View>
@@ -187,10 +193,15 @@ export function SeasonsSection({ media, progress, initialSeasonNumber }: {
   }, [currentSeason, userToggled]);
   const [progressTarget, setProgressTarget] = useState<number | undefined>(undefined);
   const [busy, setBusy] = useState(false);
+  // Unreleased titles show their season/episode structure but never a
+  // "mark watched" control — there is nothing to have watched yet.
+  const upcoming = isUpcoming(media);
 
   if (media.mediaType === 'anime' && !summaries.length) {
     // Total unknown and no season data: keep the manual stepper so existing
-    // progress is never lost.
+    // progress is never lost — unless it hasn't premiered, where a stepper
+    // would only invite marking an unwatched title as watched.
+    if (upcoming) return <UpcomingTitleNotice />;
     return <AnimeProgressCard media={media} progress={progress} />;
   }
 
@@ -232,15 +243,18 @@ export function SeasonsSection({ media, progress, initialSeasonNumber }: {
   return (
     <View style={styles.container}>
       <AppText variant="caption" muted>
-        {progress && denominator > 0 ? `${progress.watchedEpisodeCount}/${denominator} episodes watched · ` : ''}Tap an episode to toggle it · long-press marks up to here · episodes that haven’t aired stay locked
+        {upcoming
+          ? 'Not released yet — episodes unlock and become tappable on their release date.'
+          : `${progress && denominator > 0 ? `${progress.watchedEpisodeCount}/${denominator} episodes watched · ` : ''}Tap an episode to toggle it · long-press marks up to here · episodes that haven’t aired stay locked`}
       </AppText>
-      {media.mediaType === 'anime' ? <AnimeLegacyCountImporter media={media} progress={progress} /> : null}
+      {media.mediaType === 'anime' && !upcoming ? <AnimeLegacyCountImporter media={media} progress={progress} /> : null}
       {summaries.map((summary) => (
         <SeasonCard
           key={summary.seasonNumber}
           media={media}
           summary={summary}
           expanded={expanded[summary.seasonNumber] ?? false}
+          upcoming={upcoming}
           onToggleExpand={() => { setUserToggled(true); setExpanded((current) => ({ ...current, [summary.seasonNumber]: !current[summary.seasonNumber] })); }}
           onSetProgress={setProgressTarget}
           onUpToHere={confirmUpToHere}
@@ -278,6 +292,14 @@ function AnimeLegacyCountImporter({ media, progress }: { media: CatalogMedia; pr
   }, [countQuery.data, seasonQuery.data, progress?.watchedEpisodeCount, media]);
 
   return null;
+}
+
+/**
+ * Placeholder where the episode-progress controls would sit, for a title that
+ * has not been released yet. Nothing can be marked before its air date.
+ */
+function UpcomingTitleNotice() {
+  return <View style={styles.messageCard}><Ionicons name="calendar-outline" size={19} color={colors.accent} /><AppText variant="bodySmall" muted style={styles.messageText}>Not released yet — episode progress unlocks once it starts airing.</AppText></View>;
 }
 
 /**

@@ -12,6 +12,7 @@ import type { GenrePageKind } from '@/domain/repositories/CatalogRepository';
 import { CatalogError } from '@/domain/errors/CatalogError';
 import { useGenrePages } from '@/features/genres/hooks';
 import { anilistGenreFor, genreById } from '@/features/genres/catalog';
+import { prefetchMedia } from '@/features/catalog/hooks';
 import { mediaRouteId } from '@/features/catalog/mediaIdentity';
 import { isUpcoming } from '@/features/catalog/upcoming';
 import { triggerLightHaptic } from '@/lib/haptics';
@@ -47,7 +48,9 @@ export default function GenreScreen() {
     const merged: CatalogMedia[] = [];
     for (const page of query.data?.pages ?? []) {
       for (const media of page.items) {
-        if (seen.has(media.id)) continue;
+        // Genre grids are discovery shelves: unreleased titles are the
+        // Upcoming screen's job, never a "browse" poster grid.
+        if (seen.has(media.id) || isUpcoming(media)) continue;
         seen.add(media.id);
         merged.push(media);
       }
@@ -55,7 +58,11 @@ export default function GenreScreen() {
     return merged;
   }, [query.data]);
   const cardWidth = Math.max(96, Math.floor((Math.min(width, 760) - spacing.xl * 2 - spacing.md * 2) / 3));
-  const openMedia = (id: string) => router.push({ pathname: '/media/[id]', params: { id } } as never);
+  const openMedia = (id: string) => {
+    // Warm the media detail cache so the pushed page renders instantly.
+    prefetchMedia(id);
+    router.push({ pathname: '/media/[id]', params: { id } } as never);
+  };
   const loadMore = () => {
     if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
   };
@@ -113,8 +120,8 @@ export default function GenreScreen() {
           onEndReached={loadMore}
           onEndReachedThreshold={0.5}
           refreshControl={<RefreshControl refreshing={query.isRefetching && !query.isLoading} onRefresh={() => void query.refetch()} tintColor={colors.accent} colors={[colors.accent]} />}
-          ListFooterComponent={query.isFetchingNextPage ? <View style={styles.footer}><ActivityIndicator color={colors.accent} /><AppText variant="caption" muted>Loading more…</AppText></View> : !query.hasNextPage ? <AppText variant="caption" muted style={styles.end}>You have seen it all</AppText> : null}
-          renderItem={({ item }) => <PosterCard title={item.title} subtitle={subtitleFor(item)} posterUri={item.posterUrl} badge={isUpcoming(item) ? `Coming${item.year ? ` ${item.year}` : ''}` : undefined} width={cardWidth} onPress={() => openMedia(mediaRouteId(item))} />}
+          ListFooterComponent={query.isFetching && !query.isRefetching ? <View style={styles.footer}><ActivityIndicator color={colors.accent} /><AppText variant="caption" muted>Loading more…</AppText></View> : !query.hasNextPage ? <AppText variant="caption" muted style={styles.end}>You have seen it all</AppText> : null}
+          renderItem={({ item }) => <PosterCard title={item.title} subtitle={subtitleFor(item)} posterUri={item.posterUrl} width={cardWidth} onPress={() => openMedia(mediaRouteId(item))} />}
         />
         : <EmptyState
           icon="pricetags-outline"

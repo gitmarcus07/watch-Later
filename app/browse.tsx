@@ -9,7 +9,7 @@ import { EmptyState, ErrorView, PosterSkeleton } from '@/components/feedback/Fee
 import { PosterCard } from '@/components/media/PosterCard';
 import type { CatalogMedia } from '@/domain/models/media';
 import { CatalogError } from '@/domain/errors/CatalogError';
-import { useBollywoodPages, useHollywoodPages, usePopularAnimePages, usePopularMoviesPages, usePopularSeriesPages, useTrendingAllPages } from '@/features/catalog/hooks';
+import { prefetchMedia, useBollywoodPages, useHollywoodPages, usePopularAnimePages, usePopularMoviesPages, usePopularSeriesPages, useTrendingAllPages } from '@/features/catalog/hooks';
 import { mediaRouteId } from '@/features/catalog/mediaIdentity';
 import { isUpcoming } from '@/features/catalog/upcoming';
 import { triggerLightHaptic } from '@/lib/haptics';
@@ -58,7 +58,9 @@ export default function BrowseScreen() {
     const merged: CatalogMedia[] = [];
     for (const page of query.data?.pages ?? []) {
       for (const media of page.items) {
-        if (seen.has(media.id)) continue;
+        // Browse is a "what's out now" shelf: unreleased titles belong on
+        // /upcoming, so they are dropped here even if a provider ranks them.
+        if (seen.has(media.id) || isUpcoming(media)) continue;
         seen.add(media.id);
         merged.push(media);
       }
@@ -66,7 +68,11 @@ export default function BrowseScreen() {
     return merged;
   }, [query.data]);
   const cardWidth = Math.max(120, Math.floor((Math.min(width, 760) - spacing.xl * 2 - spacing.md) / 2));
-  const openMedia = (id: string) => router.push({ pathname: '/media/[id]', params: { id } });
+  const openMedia = (id: string) => {
+    // Warm the media detail cache before the push so the page opens instantly.
+    prefetchMedia(id);
+    router.push({ pathname: '/media/[id]', params: { id } });
+  };
   const loadMore = () => {
     if (query.hasNextPage && !query.isFetchingNextPage) void query.fetchNextPage();
   };
@@ -94,8 +100,8 @@ export default function BrowseScreen() {
         onEndReached={loadMore}
         onEndReachedThreshold={0.5}
         refreshControl={<RefreshControl refreshing={query.isRefetching && !query.isLoading} onRefresh={() => void query.refetch()} tintColor={colors.accent} colors={[colors.accent]} />}
-        ListFooterComponent={query.isFetchingNextPage ? <View style={styles.footer}><ActivityIndicator color={colors.accent} /><AppText variant="caption" muted>Loading more…</AppText></View> : !query.hasNextPage ? <AppText variant="caption" muted style={styles.end}>You have seen it all</AppText> : null}
-        renderItem={({ item }) => <PosterCard title={item.title} subtitle={subtitleFor(item)} posterUri={item.posterUrl} badge={isUpcoming(item) ? `Coming${item.year ? ` ${item.year}` : ''}` : undefined} width={cardWidth} onPress={() => openMedia(mediaRouteId(item))} />}
+        ListFooterComponent={query.isFetching && !query.isRefetching ? <View style={styles.footer}><ActivityIndicator color={colors.accent} /><AppText variant="caption" muted>Loading more…</AppText></View> : !query.hasNextPage ? <AppText variant="caption" muted style={styles.end}>You have seen it all</AppText> : null}
+        renderItem={({ item }) => <PosterCard title={item.title} subtitle={subtitleFor(item)} posterUri={item.posterUrl} width={cardWidth} onPress={() => openMedia(mediaRouteId(item))} />}
       />
       : <EmptyState icon="compass-outline" title="Nothing here yet" message="These shelves fill in when you're back online." actionLabel="Go to search" onAction={() => router.push('/search')} />}
   </Screen>;

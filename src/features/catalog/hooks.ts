@@ -3,6 +3,7 @@ import type { CatalogFilter, CatalogMedia, CatalogSeason, MediaIdentity, SeasonS
 import type { PagedCatalog } from '@/domain/repositories/CatalogRepository';
 import { catalogRepository } from '@/data/remote/catalog/RemoteCatalogRepository';
 import { deviceRegion } from '@/data/remote/catalog/region';
+import { parseMediaRouteId } from '@/features/catalog/mediaIdentity';
 import { fetchImdbTop } from '@/data/remote/supabase/imdbRatings';
 import { fetchImdbRatingsFor, type ImdbRating } from '@/data/remote/supabase/imdbRatings';
 import { queryClient } from '@/lib/query/queryClient';
@@ -23,14 +24,30 @@ export function useCatalogSearch(query: string, filter: CatalogFilter, enabled: 
   });
 }
 
-export function useCatalogMedia(identity: MediaIdentity | undefined) {
-  return useQuery({
-    queryKey: identity ? ['catalog', identity.provider, identity.mediaType, identity.providerId] as const : ['catalog', 'invalid'],
-    queryFn: ({ signal }) => identity ? catalogRepository.getMedia(identity, signal) : Promise.reject(new Error('Invalid media identity')),
+export function catalogMediaOptions(identity: MediaIdentity | undefined) {
+  return {
+    queryKey: identity ? ['catalog', identity.provider, identity.mediaType, identity.providerId] as const : ['catalog', 'invalid'] as const,
+    queryFn: ({ signal }: { signal: AbortSignal }) => identity ? catalogRepository.getMedia(identity, signal) : Promise.reject(new Error('Invalid media identity')),
     enabled: Boolean(identity),
     staleTime: 5 * 60_000,
     gcTime: 30 * 60_000,
-  });
+  };
+}
+
+export function useCatalogMedia(identity: MediaIdentity | undefined) {
+  return useQuery(catalogMediaOptions(identity));
+}
+
+/**
+ * Starts the detail fetch the moment a poster is tapped, so the next screen
+ * opens onto data that has been travelling during the transition instead of a
+ * blank skeleton. Same cache entry `useCatalogMedia` reads — a hit is free.
+ */
+export function prefetchMedia(routeId: string): void {
+  const identity = parseMediaRouteId(routeId);
+  if (!identity) return;
+  const { queryKey, queryFn, staleTime, gcTime } = catalogMediaOptions(identity);
+  void queryClient.prefetchQuery({ queryKey, queryFn, staleTime, gcTime });
 }
 
 /**
@@ -193,6 +210,9 @@ export function useInfiniteCatalog(key: readonly (string | number)[], fetchPage:
     queryFn: ({ pageParam, signal }) => fetchPage(pageParam, signal),
     initialPageParam: 1,
     getNextPageParam: (lastPage) => (lastPage.page < lastPage.totalPages ? lastPage.page + 1 : undefined),
+    // Changing scope/tab keeps the last good grid on screen instead of
+    // flashing an empty skeleton while the new pages load.
+    placeholderData: keepPreviousData,
     staleTime: 15 * 60_000,
     gcTime: 60 * 60_000,
     enabled,

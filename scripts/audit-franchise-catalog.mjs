@@ -74,7 +74,7 @@ for (const seedEntry of SEED) {
   }
   for (const raw of seedEntry.items) {
     const kind = raw.startsWith('tv:') ? 'series' : 'movie';
-    let seedTitle = raw.replace(/^tv:/, '');
+    let seedTitle = raw.replace(/^tv:/, '').replace(/^tmdb:\d+\s+/, '');
     let seedYear;
     const match = /^(.*)\s\((\d{4})\)$/.exec(seedTitle);
     if (match) {
